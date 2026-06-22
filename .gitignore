@@ -1,0 +1,24 @@
+# 빌드 산출물
+dist/
+web-ext-artifacts/
+*.zip
+*.crx
+
+# Chrome 런타임 생성물(로드 시 자동 생성) — 절대 커밋/배포 금지
+_metadata/
+
+# 개발 캡처/도구 산출물 (런타임 미사용, 대용량)
+output/
+
+# 백업본 (런타임 미사용)
+*.bak
+*.bak-*
+src/**/*.bak
+src/**/*.bak-*
+
+# 의존성
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db

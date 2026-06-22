@@ -1,0 +1,79 @@
+{
+  "manifest_version": 3,
+  "name": "Lonit Product Collector",
+  "version": "1.7.19",
+  "description": "Lonit source product collection and market sync extension",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "alarms",
+    "tabs",
+    "scripting",
+    "cookies",
+    "declarativeNetRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ssg_headers",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "background": {
+    "service_worker": "src/background-v1226.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.musinsa.com/*"
+      ],
+      "js": [
+        "src/content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://*.worksout.co.kr/*",
+        "*://*.adidas.co.kr/*",
+        "*://*.adidas.com/*",
+        "*://*.nike.com/*",
+        "*://gmarket.co.kr/*",
+        "*://*.gmarket.co.kr/*",
+        "*://*.auction.co.kr/*"
+      ],
+      "js": [
+        "src/site-parsers/runner.js"
+      ],
+      "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "https://www.lonit.kr/*"
+      ],
+      "js": [
+        "src/auto-invoice/lonit-bridge.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

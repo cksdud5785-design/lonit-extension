@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>BulkFlow</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { width: 320px; font-family: 'Apple SD Gothic Neo', -apple-system, sans-serif; background: #f8f9fa; }
+
+    .header { padding: 16px 20px; background: linear-gradient(135deg, #3b82f6, #2563eb); color: #fff; }
+    .header h1 { font-size: 18px; font-weight: 700; }
+    .header p { font-size: 11px; opacity: 0.8; margin-top: 2px; }
+
+    .section { padding: 16px 20px; }
+
+    .input-group { margin-bottom: 14px; }
+    .input-group label { display: block; font-size: 12px; font-weight: 600; color: #374151; margin-bottom: 6px; }
+    .input-group input { width: 100%; padding: 10px 12px; border: 1.5px solid #d1d5db; border-radius: 8px; font-size: 13px; outline: none; background: #fff; font-family: monospace; }
+    .input-group input:focus { border-color: #3b82f6; }
+    .input-group .hint { font-size: 11px; color: #9ca3af; margin-top: 4px; }
+
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 14px 0; border-top: 1px solid #e5e7eb; margin-top: 4px; }
+    .toggle-row label { font-size: 13px; font-weight: 600; color: #1a1a1a; }
+    .toggle { position: relative; width: 44px; height: 24px; cursor: pointer; }
+    .toggle input { display: none; }
+    .toggle .slider { position: absolute; inset: 0; background: #d1d5db; border-radius: 12px; transition: 0.2s; }
+    .toggle .slider::before { content: ''; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: 0.2s; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
+    .toggle input:checked + .slider { background: #3b82f6; }
+    .toggle input:checked + .slider::before { transform: translateX(20px); }
+
+    .btn { width: 100%; padding: 12px; border: none; border-radius: 10px; font-size: 14px; font-weight: 600; cursor: pointer; transition: 0.15s; }
+    .btn-primary { background: #3b82f6; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-push { background: #7c3aed; color: #fff; margin-top: 10px; }
+    .btn-push:hover { background: #6d28d9; }
+    .btn-push:disabled { background: #c4b5fd; cursor: not-allowed; }
+    .push-hint { font-size: 11px; color: #9ca3af; margin-top: 4px; text-align: center; }
+
+    .status-bar { padding: 12px 20px; background: #fff; border-top: 1px solid #e5e7eb; display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; }
+    .dot.on { background: #22c55e; }
+    .dot.off { background: #ef4444; }
+    .dot.idle { background: #d1d5db; }
+    .status-text { color: #6b7280; flex: 1; }
+    .status-text.on { color: #16a34a; }
+    .warning { margin: 0 20px 12px; padding: 10px 12px; border: 1px solid #f59e0b; border-radius: 8px; background: #fffbeb; color: #92400e; font-size: 12px; line-height: 1.4; }
+
+    .link { display: block; text-align: center; font-size: 12px; color: #3b82f6; padding: 10px; cursor: pointer; text-decoration: none; }
+    .link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>⚡ BulkFlow</h1>
+    <p>쇼핑몰 상품 대량등록 자동화</p>
+  </div>
+
+  <div class="section">
+    <div class="input-group">
+      <label>서비스 인증 KEY</label>
+      <input id="authKey" type="text" placeholder="인증 키를 입력하세요" />
+      <div class="hint">BulkFlow 관리페이지 → 환경설정 → 서비스 정보에서 확인</div>
+    </div>
+
+    <div class="toggle-row">
+      <label>상품수집 ON / OFF</label>
+      <label class="toggle">
+        <input type="checkbox" id="collectToggle" />
+        <span class="slider"></span>
+      </label>
+    </div>
+
+    <button id="saveBtn" class="btn btn-primary">설정 저장</button>
+
+    <!-- #7b: 현재 무신사 상품 페이지 즉시 push -->
+    <button id="pushBtn" class="btn btn-push" style="display:none">⚡ 지금 무신사 push</button>
+    <div class="push-hint" id="pushHint" style="display:none">현재 탭의 무신사 상품을 서버에 바로 전송합니다</div>
+  </div>
+
+  <div class="status-bar">
+    <span class="dot idle" id="statusDot"></span>
+    <span class="status-text" id="statusText">인증 KEY를 입력하세요</span>
+  </div>
+  <div class="warning" id="musinsaWarning" style="display:none"></div>
+
+  <!-- 2026-06-12: 업데이트 처리량/차단 모니터 (서비스워커 GET_UPDATE_STATS 폴링) -->
+  <div id="updateMonitor" style="margin:10px 14px 4px;padding:8px 10px;border:1px solid #e5e7eb;border-radius:8px;font-size:11px;color:#374151;display:none">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+      <strong style="font-size:11px">업데이트 모니터</strong>
+      <span id="monSsg" style="color:#6b7280"></span>
+    </div>
+    <div id="monRows" style="display:grid;grid-template-columns:auto 1fr auto;gap:2px 8px;line-height:1.5"></div>
+  </div>
+
+  <a class="link" id="openDashboard">BulkFlow 관리페이지 열기 →</a>
+
+  <script src="popup.js"></script>
+</body>
+</html>
