@@ -1,0 +1,64 @@
+name: Publish extension (Chrome Web Store)
+
+# 트리거: 버전 태그(v*) 푸시 → 자동 빌드→업로드→게시. 수동 실행도 가능.
+#   릴리스 흐름:  npm run release:patch   (버전업+커밋+태그)  →  git push --follow-tags
+# 필요한 repo 시크릿(5개): CWS_EXTENSION_ID, CWS_PUBLISHER_ID, CWS_CLIENT_ID, CWS_CLIENT_SECRET, CWS_REFRESH_TOKEN
+#   설정법: docs/CI-PUBLISH-SETUP.md
+# 게시 API: Chrome Web Store API V2 (fregante/chrome-webstore-upload-cli@4). 구 V1 은 2026-10-15 종료.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}   # 대시보드에서 수동 실행도 허용
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cws-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 로컬과 동일한 패커 재사용(ubuntu 러너에 pwsh 사전설치) → 빌드 드리프트 없음.
+      - name: Build clean zip
+        shell: pwsh
+        run: ./tools/package.ps1
+
+      - name: Resolve zip path
+        id: zip
+        run: |
+          path="$(ls dist/lonit-extension-*.zip | head -n1)"
+          test -n "$path" || { echo "::error::dist zip 을 찾지 못함"; exit 1; }
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+          echo "빌드된 패키지: $path"
+
+      - name: Upload & publish to Chrome Web Store (API V2)
+        env:
+          EXTENSION_ID: ${{ secrets.CWS_EXTENSION_ID }}
+          PUBLISHER_ID: ${{ secrets.CWS_PUBLISHER_ID }}
+          CLIENT_ID: ${{ secrets.CWS_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.CWS_CLIENT_SECRET }}
+          REFRESH_TOKEN: ${{ secrets.CWS_REFRESH_TOKEN }}
+        run: |
+          if [ -z "$CLIENT_ID" ] || [ -z "$REFRESH_TOKEN" ] || [ -z "$EXTENSION_ID" ]; then
+            echo "::error::CWS 시크릿(CWS_CLIENT_ID/CWS_REFRESH_TOKEN/CWS_EXTENSION_ID 등)이 설정되지 않았습니다. docs/CI-PUBLISH-SETUP.md 참고."
+            exit 1
+          fi
+          # 인자 없는 호출 = 업로드 + 게시(검수 제출). 검수 통과 후 게시됩니다.
+          npx --yes chrome-webstore-upload-cli@4 --source "${{ steps.zip.outputs.path }}"
+          # ── 대안 ─────────────────────────────────────────────
+          #  업로드만(게시는 대시보드에서 수동):  npx --yes chrome-webstore-upload-cli@4 upload  --source "${{ steps.zip.outputs.path }}"
+          #  단계적 출시(예: 20%):               (업로드 후)  npx --yes chrome-webstore-upload-cli@4 publish --deploy-percentage 20
+          #  신뢰 테스터에게만:                   npx --yes chrome-webstore-upload-cli@4 publish --trusted-testers

@@ -4,7 +4,9 @@
 #   - manifest.json 이 zip 루트에 오도록 폴더 '내용물'을 담는다(Chrome 필수 규격).
 #   - 런타임에 필요한 파일만 allowlist 로 포함하고, src 내 .bak/__tests__/*.test.mjs 등은 제외.
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+# PS7(.NET Core, Windows/Linux 공통)에선 압축 타입이 기본 로드됨. Windows PowerShell 5.1 호환용으로만 시도.
+Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
 
 $root = Split-Path -Parent $PSScriptRoot   # tools/ 의 상위 = 확장 루트
 $manifestPath = Join-Path $root 'manifest.json'
