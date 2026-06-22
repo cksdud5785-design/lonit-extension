@@ -8,6 +8,7 @@
     "version": "node tools/sync-version.mjs && git add manifest.json",
     "postversion": "npm run build",
     "release:patch": "npm version patch -m \"chore(ext): release v%s\"",
-    "release:minor": "npm version minor -m \"chore(ext): release v%s\""
+    "release:minor": "npm version minor -m \"chore(ext): release v%s\"",
+    "publish:cws": "node tools/cws-publish.mjs"
   }
 }
