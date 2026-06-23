@@ -631,7 +631,9 @@ function extractSpecsFromNotices(notices) {
     ['caution', ['취급시 주의사항', '주의사항', '세탁방법']],
     ['qualityAssuranceStandard', ['품질보증기준', '품질보증']],
     ['afterService', ['A/S 책임자', 'AS 책임자', '전화번호']],
-    ['modelName', ['품번', '모델명', '모델번호']],
+    // Coupang 2026-08-01 식별번호 정책 — 정보고시 품번/모델명/모델번호를 canonical 한글 키 '품번' 으로 저장.
+    //   (무신사/SSG 와 동일 키. 업로더 MPN 게이트가 specs['품번'] 을 읽음.)
+    ['품번', ['품번', '모델명', '모델번호']],
   ];
   for (const [specKey, keywords] of mappings) {
     const found = notices.find((notice) => {
@@ -995,6 +997,12 @@ function applyDetailToProduct(product, detail) {
     itemStockStatus: detail?.itemStockStatus ?? null,
     frontItemStockStatus: detail?.frontItemStockStatus ?? null,
   };
+  // Coupang 2026-08-01 식별번호 정책 — 정보고시에 품번이 없으면 KC 인증 모델명(kcModelName)을 품번 후보로 보강.
+  //   29cm 신발/의류 고시는 품번 행이 없는 경우가 많고, itemNo(소싱 ID)는 정책상 금지값이라 식별번호로 못 씀.
+  if (!specs['품번'] && detail?.kcModelName) {
+    const kcModelName = String(detail.kcModelName).trim();
+    if (kcModelName) specs['품번'] = kcModelName;
+  }
   if (itemDescription) specs.itemDescription = itemDescription.slice(0, 1500);
 
   return {

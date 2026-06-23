@@ -634,6 +634,24 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
+// 2026-06-23: 무신사 재로그인 즉시 재감지 — 세션 쿠키(app_atk/app_rtk/mss_mac) 변경 시
+//   syncAllCookies 를 8초 debounce 로 재실행. 기존엔 'lonit-cookie-sync' 60분 알람/재시작
+//   때만 재검사 → 재로그인해도 최대 60분 "무신사 로그인 미감지" 잔존(특히 mss_mac 단명).
+//   재동기화 직후 heartbeat 도 즉시 보내 대시보드 explicit musinsaLoggedIn 을 갱신한다.
+let _musinsaCookieSyncTimer = null;
+chrome.cookies.onChanged.addListener((info) => {
+  const ck = info?.cookie;
+  if (!ck || !ck.domain || !ck.domain.includes('musinsa.com')) return;
+  if (!['app_atk', 'app_rtk', 'mss_mac'].includes(ck.name)) return;
+  if (_musinsaCookieSyncTimer) clearTimeout(_musinsaCookieSyncTimer);
+  _musinsaCookieSyncTimer = setTimeout(() => {
+    _musinsaCookieSyncTimer = null;
+    syncAllCookies()
+      .then(() => sendHeartbeat('musinsa-cookie-change'))
+      .catch((err) => console.log('[Lonit] musinsa 쿠키변경 재동기화 실패:', err?.message));
+  }, 8000);
+});
+
 // ─── D1 (2026-05-18): Activation burst — chrome 켜자마자 즉시 stale catch-up ──
 // 기존 alarm 'lonit-update-check' (2분 주기) 으로는 사용자가 chrome 열고
 // 첫 polling 까지 최대 2분 대기. activation 시점에 즉시 1회 trigger 해 wait 제거.
