@@ -58,15 +58,23 @@ export function registerSourcingExternalHandler() {
           const goodsNo = (String(sourceUrl).match(/products\/(\d+)/) || [])[1];
           // 무신사: CDP 자동화(옵션 STRICT 매칭→선택→수량→구매하기→주문서→고객주소 생성→결제 직전 정지).
           // 옵션 문자열은 원문 그대로 전달(드라이버가 옵션 API 와 토큰 대조, 옵션 없는 상품도 처리).
+          // ★응답은 탭 오픈 직후 즉시 ack — 전체 플로우(30~60s)를 기다리면 웹 sendMessage 가
+          //   타임아웃돼 "확장 실행 실패"로 오판. 진행/결과는 열린 탭에서 사용자가 보고,
+          //   최종 결과는 lastCdpResult(storage, GET_LAST_RESULT)로 남긴다.
           if (d.vendor === 'musinsa' && goodsNo && d.recipient) {
             const rc = d.recipient;
             const recipient = { name: rc.name, phone: rc.phone, zipcode: rc.zipCode, address: rc.address, addressDetail: rc.addressDetail };
             const tab = await chrome.tabs.create({ url: sourceUrl, active: true });
             try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
             try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }
-            await waitTabComplete(tab.id);
-            const r = await cdpSelectOptionAndBuy(tab.id, goodsNo, d.option || '', { recipient, quantity: d.quantity });
-            sendResponse(r && r.ok ? { ok: true, phase: 'cdp', stage: r.stage } : { ok: false, phase: 'cdp', error: (r && r.stage) || 'cdp failed', detail: r });
+            sendResponse({ ok: true, phase: 'cdp', accepted: true });
+            try {
+              await waitTabComplete(tab.id);
+              const r = await cdpSelectOptionAndBuy(tab.id, goodsNo, d.option || '', { recipient, quantity: d.quantity });
+              await chrome.storage.local.set({ lastCdpResult: { at: Date.now(), orderId, res: r } });
+            } catch (err) {
+              try { await chrome.storage.local.set({ lastCdpResult: { at: Date.now(), orderId, res: { ok: false, error: err && err.message ? err.message : 'cdp failed' } } }); } catch (e2) { void e2; }
+            }
             return;
           }
           // 폴백: 미지원 벤더/조건 미충족 → 보이는 탭 open(사용자 수동 진행/결제).
