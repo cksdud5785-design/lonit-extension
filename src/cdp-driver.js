@@ -239,18 +239,26 @@ function fOptionRowByValue(value, allValues) {
   return `(function(){`
     + `var want=${JSON.stringify(want)};var all=${JSON.stringify(all)};var vh=window.innerHeight;`
     + `var norm=function(t){return String(t||'').replace(/\\s+/g,'').toUpperCase();};`
+    // ★옵션 행은 반드시 열린 Radix 드롭다운 메뉴 안에 있다 → 검색을 메뉴 컨테이너 내부로 스코핑.
+    //   이렇게 하면 페이지 프로모("100만원 적립금"이 '100' 오매칭) 등 메뉴 밖 텍스트를 원천 배제하고,
+    //   동시에 "메뉴 안에 값 행이 있다"=드롭다운 열림의 신뢰 신호가 된다(열림 오탐 제거).
+    + `var menus=[].slice.call(document.querySelectorAll('[class*="dropdown-menu"],[role="menu"],[role="listbox"]')).filter(function(mn){var r=mn.getBoundingClientRect();return r.width>0&&r.height>0;});`
     + `var isClk=function(e){if(!e||!e.tagName)return false;if(e.tagName==='LI'||e.tagName==='BUTTON'||e.tagName==='A')return true;`
     + `var role=e.getAttribute&&e.getAttribute('role');if(role==='option'||role==='menuitem'||role==='menuitemradio')return true;`
     + `try{return getComputedStyle(e).cursor==='pointer';}catch(_){return false;}};`
-    + `var els=document.querySelectorAll('li,button,a,div,span,[role]');var cands=[];`
+    + `var cands=[];`
+    + `for(var mi=0;mi<menus.length;mi++){var els=menus[mi].querySelectorAll('li,button,a,div,span,[role]');`
     + `for(var i=0;i<els.length;i++){var e=els[i];var t=norm(e.textContent);if(!t||t.length>60)continue;`
     + `var m=null;for(var k=0;k<all.length;k++){if(t.indexOf(all[k])===0){m=all[k];break;}}`
     + (want === null ? `if(m===null)continue;` : `if(m!==${JSON.stringify(want)})continue;`)
-    // 경계문자: 라틴영숫자("MUSINSA")·쉼표/원("120,730원" 가격 오탐) 이면 옵션 행이 아님.
-    + `var nx=t.charAt(m.length);if(nx&&/[A-Z0-9,원.]/.test(nx))continue;`
+    // 경계문자: 뒤가 라틴 문자면 옵션 값이 아님("M"→"MINT"/"MUSINSA" 배제). 숫자 경계는 배제하지
+    //   않는다 — 값 뒤에 배송일이 숫자로 붙는 행("15007.05(일) 이내 발송")이 흔하고, "150" vs "1500"
+    //   구분은 all 을 길이 내림차순 정렬해 더 긴 값을 먼저 매칭하는 것으로 이미 해결. (메뉴-스코핑이라
+    //   가격 "120,730원" 같은 메뉴 밖 오탐은 애초에 후보에 없음.)
+    + `var nx=t.charAt(m.length);if(nx&&/[A-Z]/.test(nx))continue;`
     + `if(!isClk(e))continue;`
-    // 뷰포트 밖도 후보 유지(드롭다운 리스트는 스크롤 컨테이너 — 6개 이상이면 잘림) → reveal 로 노출.
-    + `var r=e.getBoundingClientRect();if(r.width<=0||r.height<=0||r.height>90)continue;cands.push(e);}`
+    // 뷰포트 밖/스크롤 클립 밖도 후보 유지(드롭다운은 스크롤 컨테이너) → reveal 로 노출.
+    + `var r=e.getBoundingClientRect();if(r.width<=0||r.height<=0||r.height>90)continue;cands.push(e);}}`
     + `cands.sort(function(a,b){return a.getBoundingClientRect().top-b.getBoundingClientRect().top;});`
     + `return cands[0]||null;})()`;
 }
@@ -266,21 +274,29 @@ const HIT_TEST_FN = `var hitOk=function(el){var r=el.getBoundingClientRect();`
   + `if(!h)return false;if(h===el||el.contains(h))return true;`
   + `return h.contains(el)&&h.getBoundingClientRect().height<100;};`;
 
-// 히트 불가면 팝업 내부 스크롤 컨테이너만 스크롤해 노출(페이지 스크롤 금지 — 페이지가 움직이면
-// Radix 팝업이 닫힘. 컨테이너 scrollTop 조작은 팝업 유지, 라이브 실증).
+// 행의 스크롤 컨테이너를 찾아, 컨테이너 "클립 영역" 기준으로 행이 완전히 보이지 않으면 컨테이너를
+// 스크롤해 행을 클립 중앙에 정렬(페이지 스크롤 금지 — 페이지가 움직이면 Radix 팝업이 닫힘).
+// ★뷰포트가 아니라 컨테이너 client rect 로 판정해야 함: 뷰포트엔 들어있어도 스크롤 컨테이너 아래로
+//   30px 잘린 행은 그 좌표 클릭이 클립 경계에 떨어져 선택이 안 된다(실측 6689989 095).
+const SCROLLER_OF = `var scrollerOf=function(el){var sc=el.parentElement;`
+  + `while(sc&&sc!==document.body){var st=getComputedStyle(sc);`
+  + `if(/(auto|scroll)/.test(st.overflowY)&&sc.scrollHeight>sc.clientHeight+4)return sc;sc=sc.parentElement;}`
+  + `return null;};`;
 function revealRowExpr(rowFinder) {
-  return `(function(){${HIT_TEST_FN}var el=(${rowFinder});if(!el)return 0;`
-    + `if(hitOk(el))return 1;`
-    + `var r=el.getBoundingClientRect();var sc=el.parentElement;`
-    + `while(sc&&sc!==document.body){var st=getComputedStyle(sc);`
-    + `if(/(auto|scroll)/.test(st.overflowY)&&sc.scrollHeight>sc.clientHeight+4)break;sc=sc.parentElement;}`
-    + `if(!sc||sc===document.body)return 0;`
-    + `var sr=sc.getBoundingClientRect();sc.scrollTop+=(r.top-(sr.top+sr.height/2-r.height/2));return 2;})()`;
+  return `(function(){${SCROLLER_OF}var el=(${rowFinder});if(!el)return 0;`
+    + `var sc=scrollerOf(el);if(!sc){el.scrollIntoView&&el.scrollIntoView({block:'nearest'});return 1;}`
+    + `var r=el.getBoundingClientRect();var sr=sc.getBoundingClientRect();`
+    // 컨테이너 클립 안에 완전히 들어있으면 스크롤 불필요.
+    + `if(r.top>=sr.top+2&&r.bottom<=sr.bottom-2)return 1;`
+    // 아니면 컨테이너를 스크롤해 행을 클립 중앙에 정렬.
+    + `sc.scrollTop+=(r.top+r.height/2)-(sr.top+sr.height/2);return 2;})()`;
 }
-// 히트테스트 통과 시에만 좌표 반환(아니면 클릭 금지).
+// 클릭 좌표 반환: 행이 스크롤 컨테이너 클립 안에 완전히 있고(경계 아님) 히트테스트 통과할 때만.
 function centerInViewExpr(finderExpr) {
-  return `(function(){${HIT_TEST_FN}var el=(${finderExpr});if(!el)return null;`
-    + `if(!hitOk(el))return null;var r=el.getBoundingClientRect();`
+  return `(function(){${HIT_TEST_FN}${SCROLLER_OF}var el=(${finderExpr});if(!el)return null;`
+    + `var r=el.getBoundingClientRect();var sc=scrollerOf(el);`
+    + `if(sc){var sr=sc.getBoundingClientRect();if(r.top<sr.top+2||r.bottom>sr.bottom-2)return null;}`
+    + `if(!hitOk(el))return null;`
     + `return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
 }
 
