@@ -28,6 +28,10 @@ import { pushMusinsaProduct, extractMusinsaGoodsNo } from './musinsa-sync-push.j
 // useWindowCollector=true entry 만 본 경로로 실행 — 기존 fetch path 보존.
 import { collectFromUrl } from './window-collector.js';
 import { SITE_PARSERS } from './site-parsers/index.js';
+import { registerSourcingExternalHandler } from './sourcing-checkout.js';
+
+// 2026-07-01: 웹(lonit.kr)→확장 "주문시작"(소싱처 체크아웃 자동화) 외부 메시지 핸들러 등록.
+registerSourcingExternalHandler();
 
 const DEFAULT_COLLECT_LIMIT = 10000;
 const collectingMarkets = new Set(); // 소싱처별 병렬 수집 지원

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lonit Product Collector",
-  "version": "1.7.20",
+  "version": "1.7.21",
   "description": "Lonit source product collection and market sync extension",
   "permissions": [
     "storage",
@@ -10,11 +10,16 @@
     "tabs",
     "scripting",
     "cookies",
-    "declarativeNetRequest"
+    "declarativeNetRequest",
+    "webNavigation",
+    "debugger"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
+  "externally_connectable": {
+    "matches": ["https://www.lonit.kr/*"]
+  },
   "declarative_net_request": {
     "rule_resources": [
       {
