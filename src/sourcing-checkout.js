@@ -25,9 +25,10 @@ function waitTabComplete(tabId, timeout = 20000) {
   });
 }
 
-// payload.option 에서 사이즈 토큰 추출("블랙/M"→"M", "M"→"M"). 없으면 원본 trim.
+// payload.option 에서 사이즈 토큰 추출. 앞뒤 영숫자 경계 확인 → "ADIDAS"의 S, "M-65"의 M,
+// 색상명 오탐 방지. "아디다스…White, M x1"→M, "블랙/M"→M, "M"→M. 없으면 원본 trim.
 function extractSizeToken(opt) {
-  const m = String(opt || '').toUpperCase().match(/(4XL|3XL|2XL|XL|XS|S|M|L)(?![A-Z0-9])/);
+  const m = String(opt || '').toUpperCase().match(/(?<![A-Z0-9])(4XL|3XL|2XL|XL|XS|S|M|L)(?![A-Z0-9])/);
   return m ? m[1] : String(opt || '').trim();
 }
 
@@ -62,16 +63,16 @@ export function registerSourcingExternalHandler() {
             return;
           }
           const goodsNo = (String(sourceUrl).match(/products\/(\d+)/) || [])[1];
-          // 무신사: CDP 자동화(옵션선택→구매하기→주문서→소싱슬롯 주소 덮어쓰기→결제 직전 정지).
+          // 무신사: CDP 자동화(옵션선택→구매하기→주문서→고객주소 생성/기본지정→결제 직전 정지).
           if (d.vendor === 'musinsa' && goodsNo && d.option && d.recipient) {
             const rc = d.recipient;
-            const recipient = { name: rc.name, phone: rc.phone, zipcode: rc.zipCode, address1: rc.address, address2: rc.addressDetail, message: d.memo || '' };
+            const recipient = { name: rc.name, phone: rc.phone, zipcode: rc.zipCode, address: rc.address, addressDetail: rc.addressDetail };
             const tab = await chrome.tabs.create({ url: sourceUrl, active: true });
             try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
             try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }
             await waitTabComplete(tab.id);
-            const r = await cdpSelectOptionAndBuy(tab.id, extractSizeToken(d.option), { recipient, slotId: msg.slotId });
-            sendResponse(r && r.ok ? { ok: true, phase: 'cdp', stage: r.stage } : { ok: false, phase: 'cdp', error: (r && r.stage) || 'cdp failed' });
+            const r = await cdpSelectOptionAndBuy(tab.id, extractSizeToken(d.option), { recipient });
+            sendResponse(r && r.ok ? { ok: true, phase: 'cdp', stage: r.stage } : { ok: false, phase: 'cdp', error: (r && r.stage) || 'cdp failed', detail: r });
             return;
           }
           // 폴백: 미지원 벤더/조건 미충족 → 보이는 탭 open(사용자 수동 진행/결제).
@@ -100,7 +101,7 @@ export function registerSourcingExternalHandler() {
           try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
           try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }
           await waitTabComplete(tab.id);
-          const res = await cdpSelectOptionAndBuy(tab.id, targetSize, { recipient: msg.recipient, slotId: msg.slotId });
+          const res = await cdpSelectOptionAndBuy(tab.id, targetSize, { recipient: msg.recipient });
           sendResponse(res);
         } catch (err) {
           sendResponse({ ok: false, error: err && err.message ? err.message : 'cdp test failed' });
