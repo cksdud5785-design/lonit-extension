@@ -25,13 +25,6 @@ function waitTabComplete(tabId, timeout = 20000) {
   });
 }
 
-// payload.option 에서 사이즈 토큰 추출. 앞뒤 영숫자 경계 확인 → "ADIDAS"의 S, "M-65"의 M,
-// 색상명 오탐 방지. "아디다스…White, M x1"→M, "블랙/M"→M, "M"→M. 없으면 원본 trim.
-function extractSizeToken(opt) {
-  const m = String(opt || '').toUpperCase().match(/(?<![A-Z0-9])(4XL|3XL|2XL|XL|XS|S|M|L)(?![A-Z0-9])/);
-  return m ? m[1] : String(opt || '').trim();
-}
-
 export function registerSourcingExternalHandler() {
   if (!chrome.runtime.onMessageExternal) return; // 구버전 방어
   chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
@@ -63,15 +56,16 @@ export function registerSourcingExternalHandler() {
             return;
           }
           const goodsNo = (String(sourceUrl).match(/products\/(\d+)/) || [])[1];
-          // 무신사: CDP 자동화(옵션선택→구매하기→주문서→고객주소 생성/기본지정→결제 직전 정지).
-          if (d.vendor === 'musinsa' && goodsNo && d.option && d.recipient) {
+          // 무신사: CDP 자동화(옵션 STRICT 매칭→선택→수량→구매하기→주문서→고객주소 생성→결제 직전 정지).
+          // 옵션 문자열은 원문 그대로 전달(드라이버가 옵션 API 와 토큰 대조, 옵션 없는 상품도 처리).
+          if (d.vendor === 'musinsa' && goodsNo && d.recipient) {
             const rc = d.recipient;
             const recipient = { name: rc.name, phone: rc.phone, zipcode: rc.zipCode, address: rc.address, addressDetail: rc.addressDetail };
             const tab = await chrome.tabs.create({ url: sourceUrl, active: true });
             try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
             try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }
             await waitTabComplete(tab.id);
-            const r = await cdpSelectOptionAndBuy(tab.id, extractSizeToken(d.option), { recipient });
+            const r = await cdpSelectOptionAndBuy(tab.id, goodsNo, d.option || '', { recipient, quantity: d.quantity });
             sendResponse(r && r.ok ? { ok: true, phase: 'cdp', stage: r.stage } : { ok: false, phase: 'cdp', error: (r && r.stage) || 'cdp failed', detail: r });
             return;
           }
@@ -89,25 +83,34 @@ export function registerSourcingExternalHandler() {
     // 결제는 절대 하지 않음(주문서 도달 후 정지). 검증 통과 후 START_SOURCING_CHECKOUT 에 통합 예정.
     if (msg && msg.type === 'CDP_CHECKOUT_TEST') {
       const goodsNo = String(msg.goodsNo || '').replace(/[^0-9]/g, '');
-      const targetSize = String(msg.targetSize || '').trim().slice(0, 20);
-      if (!goodsNo || !targetSize) {
-        sendResponse({ ok: false, error: 'goodsNo/targetSize required' });
+      const option = String(msg.option || msg.targetSize || '').trim().slice(0, 200);
+      if (!goodsNo) {
+        sendResponse({ ok: false, error: 'goodsNo required' });
         return;
       }
       (async () => {
+        let res = null;
         try {
           const tab = await chrome.tabs.create({ url: `https://www.musinsa.com/products/${goodsNo}`, active: true });
           // 탭 창을 포커스+활성화(렌더 강제 — 백그라운드 탭은 innerHeight=0 이라 옵션 클릭 불가).
           try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
           try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }
           await waitTabComplete(tab.id);
-          const res = await cdpSelectOptionAndBuy(tab.id, targetSize, { recipient: msg.recipient });
-          sendResponse(res);
+          res = await cdpSelectOptionAndBuy(tab.id, goodsNo, option, { recipient: msg.recipient, quantity: msg.quantity });
         } catch (err) {
-          sendResponse({ ok: false, error: err && err.message ? err.message : 'cdp test failed' });
+          res = { ok: false, error: err && err.message ? err.message : 'cdp test failed' };
         }
+        // 응답 채널 유실 대비: 결과를 storage 에도 남김(GET_LAST_RESULT 로 조회).
+        try { await chrome.storage.local.set({ lastCdpResult: { at: Date.now(), goodsNo, res } }); } catch (e) { void e; }
+        try { sendResponse(res); } catch (e) { void e; }
       })();
       return true; // 비동기 sendResponse 유지
+    }
+
+    // dev: 마지막 CDP 테스트 결과 조회(응답 채널 유실 시 폴백).
+    if (msg && msg.type === 'GET_LAST_RESULT') {
+      chrome.storage.local.get('lastCdpResult', (o) => { sendResponse(o && o.lastCdpResult ? o.lastCdpResult : null); });
+      return true;
     }
 
     // 자가 리로드(dev 자동화): 코드 수정 후 확장을 프로그램적으로 재로드(unpacked 는 디스크서 재읽음).

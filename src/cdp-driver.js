@@ -73,8 +73,55 @@ async function clickElement(tabId, finderExpr, label) {
 }
 
 // ---- finder 식(페이지 컨텍스트) ----
-const F_SIZE_TRIGGER = `document.querySelector('input[placeholder="사이즈"]')`;
 const F_BUY = `[].find.call(document.querySelectorAll('button'),function(b){return (b.textContent||'').trim()==='구매하기'})`;
+
+// ---- 옵션 매칭(STRICT, spec ⑥) ----
+// 마켓주문 옵션 문자열("옵션:BEG/095-1개", "…, 120, 기타 x1", "사이즈: 270", "WHT/000" 등)을
+// 토큰으로 분해해 무신사 옵션 API(optionItems)와 대조 → 유일 아이템만 확정, 모호하면 STOP.
+export function parseOptionTokens(opt) {
+  let s = String(opt || '').trim();
+  s = s.replace(/^옵션\s*[::]\s*/i, '').replace(/^사이즈\s*[::]\s*/i, '');
+  s = s.replace(/\s*[xX×]\s*\d+\s*$/, '').replace(/\s*-\s*\d+\s*개\s*$/, '');
+  return s.split(/[\/,]/).map((t) => t.trim()).filter(Boolean);
+}
+const normOpt = (t) => String(t || '').replace(/\s+/g, '').toUpperCase();
+
+// items: [{no, values:[string]}] (활성만). 규칙: ①아이템이 1개뿐이면 그것(옵션 없는 상품 포함)
+// ②모든 차원 값이 주문 토큰에 포함되는 아이템이 정확히 1개면 그것 ③그 외 null(fail-loud).
+export function matchOptionItem(items, orderOption) {
+  const active = Array.isArray(items) ? items : [];
+  if (active.length === 1) return { item: active[0], reason: 'single' };
+  const tokens = parseOptionTokens(orderOption).map(normOpt);
+  const hits = active.filter((it) => it.values.length > 0 && it.values.every((v) => tokens.includes(normOpt(v))));
+  if (hits.length === 1) return { item: hits[0], reason: 'token' };
+  return { item: null, reason: hits.length === 0 ? 'no_match' : 'ambiguous', hitCount: hits.length };
+}
+
+// 옵션 메타(차원명 + 활성 아이템) — PDP 탭에서 same-origin CORS 로 조회.
+function optionsFetchExpr(goodsNo) {
+  return `(async function(){try{`
+    + `var r=await fetch('https://goods-detail.musinsa.com/api2/goods/${Number(goodsNo)}/options?goodsSaleType=SALE',{credentials:'include',headers:{'Accept':'application/json'}});`
+    + `var j=await r.json();var d=(j&&j.data)||{};var items=[];var arr=d.optionItems||[];`
+    + `for(var i=0;i<arr.length;i++){var it=arr[i];if(it.isDeleted||it.activated===false)continue;`
+    + `items.push({no:it.no,values:(it.optionValues||[]).map(function(v){return String(v.name||'');})});}`
+    + `var dims=(d.basic||[]).map(function(b){return String(b.name||b.optionName||'');});`
+    + `return {ok:true,dims:dims,items:items};}catch(e){return {ok:false,err:String(e&&e.message||e)};}})()`;
+}
+
+// 차원 드롭다운 트리거: placeholder==차원명 우선(사이즈/색상/Size/C/S…), 폴백=빈 값의 readonly 입력.
+function fDimTrigger(dim) {
+  return `(function(){var el=document.querySelector('input[placeholder='+JSON.stringify(${JSON.stringify(String(dim))})+']');`
+    + `if(el){var r=el.getBoundingClientRect();if(r.width>0&&r.height>0)return el;}`
+    + `var ins=document.querySelectorAll('input[placeholder]');`
+    + `for(var i=0;i<ins.length;i++){var e=ins[i];var r2=e.getBoundingClientRect();`
+    + `if(r2.width>100&&r2.height>0&&!e.value&&(e.readOnly||e.hasAttribute('readonly')))return e;}`
+    + `return null;})()`;
+}
+
+// 수량 스테퍼: [BUTTON(−), INPUT(readonly,값), BUTTON(+)] 구조(실측) → input 의 다음 형제가 '+'.
+const F_QTY_INPUT = `[].find.call(document.querySelectorAll('input'),function(e){var r=e.getBoundingClientRect();return r.width>0&&r.width<60&&(e.readOnly||e.hasAttribute('readonly'))&&/^\\d+$/.test(e.value||'');})`;
+const F_QTY_PLUS = `(function(){var inp=${F_QTY_INPUT};if(!inp)return null;var nb=inp.nextElementSibling;return (nb&&nb.tagName==='BUTTON')?nb:null;})()`;
+const QTY_VALUE_EXPR = `(function(){var inp=${F_QTY_INPUT};return inp?Number(inp.value):null;})()`;
 
 // ---- 배송지(주소) 헬퍼 ----
 // saveAction/updateAction 은 (zipcode, address1) 쌍을 우편DB 로 검증하며, 실패·레이트리밋 모두
@@ -96,39 +143,58 @@ function normPhone(p) {
   return String(p || '').trim();
 }
 
-function shortSido(a) {
+// 시도 표기 변형 생성: 축약형 우선 + 원형 유지. "○○통합특별시"(행정개편명, 예: 전남광주통합특별시)는
+// Daum 축약형이 불명이라 도시명(뒤 2자)·전체 축약 둘 다 시도.
+function sidoVariants(a) {
   const s = String(a || '').trim();
+  const out = [];
+  const add = (v) => { if (v && !out.includes(v)) out.push(v); };
   for (const k of Object.keys(SIDO_SHORT)) {
-    if (s.startsWith(k)) return SIDO_SHORT[k] + s.slice(k.length);
+    if (s.startsWith(k)) { add(SIDO_SHORT[k] + s.slice(k.length)); break; }
   }
-  return s;
+  const m = s.match(/^([가-힣]{2,8})통합특별시(?=\s)/);
+  if (m) { add(m[1].slice(-2) + s.slice(m[0].length)); add(m[1] + s.slice(m[0].length)); }
+  add(s);
+  return out;
 }
 
 // 마켓주문 receiver_address 는 "기본주소+건물명+상세" 합본이 흔함(예: "인천광역시 부평구 산곡동 222
 // 한신휴아파트 102동 1304호") → 통과 가능성 순서로 후보 사다리 생성. 최종 검증은 saveAction 이 한다.
+// detail 이 기본주소 일부를 잘라먹는 케이스("다대로429번길 20, 209동…" 의 detail "20, 209동…")가
+// 있어 detail-제거본과 원문 둘 다에서 추출한다. 경계는 공백/쉼표/괄호.
 export function buildAddressCandidates(address, detail) {
   const raw = String(address || '').trim();
   const det = String(detail || '').trim();
   let base = raw;
   if (det && base.endsWith(det)) base = base.slice(0, base.length - det.length).trim();
   else if (det && base.includes(det)) base = base.replace(det, ' ').replace(/\s+/g, ' ').trim();
-  const noParen = base.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
-  const s = shortSido(noParen).replace(/([동리가])(\d)/, '$1 $2'); // "산곡동222"→"산곡동 222"
-  // 도로명: 마지막 "…로/길 번호(-부번)" 까지(도로명 내부 숫자 "동일로237나길" 은 greedy 로 통과).
-  const road = s.match(/^(.+(?:로|길)\s*\d+(?:-\d+)?)(?=\s|\(|$)/);
-  // 지번: 마지막 "…동/리/가 (산)번지(-부번)" 까지.
-  const jibun = s.match(/^(.+[동리가]\s+(?:산\s*)?\d+(?:-\d+)?)(?=\s|\(|$)/);
+  const srcs = [];
+  for (const b of base !== raw ? [base, raw] : [base]) {
+    const noParen = b.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+    for (const v of sidoVariants(noParen)) {
+      const s = v.replace(/([동리가])(\d)/, '$1 $2'); // "산곡동222"→"산곡동 222"
+      if (!srcs.includes(s)) srcs.push(s);
+    }
+  }
   const cands = [];
-  const push = (a1) => {
-    const v = String(a1 || '').trim();
+  const push = (a1, src) => {
+    const v = String(a1 || '').trim().replace(/,+$/, '');
     if (!v || cands.some((c) => c.address1 === v)) return;
-    const rest = s.startsWith(v) ? s.slice(v.length).trim() : '';
+    const rest = src && src.startsWith(v) ? src.slice(v.length).replace(/^[\s,]+/, '').trim() : '';
     cands.push({ address1: v, address2: [rest, det].filter(Boolean).join(' ').trim() || det });
   };
-  if (road) push(road[1]);
-  if (jibun) push(jibun[1]);
-  push(s);
-  push(raw);
+  for (const s of srcs) {
+    // 도로명: 마지막 "…로/길 번호(-부번)" 까지(도로명 내부 숫자 "동일로237나길" 은 greedy 로 통과).
+    const road = s.match(/^(.+(?:로|길)\s*\d+(?:-\d+)?)(?=[\s,(]|$)/);
+    if (road) push(road[1], s);
+  }
+  for (const s of srcs) {
+    // 지번: 마지막 "…동/리/가 (산)번지(-부번)" 까지.
+    const jibun = s.match(/^(.+[동리가]\s+(?:산\s*)?\d+(?:-\d+)?)(?=[\s,(]|$)/);
+    if (jibun) push(jibun[1], s);
+  }
+  for (const s of srcs) push(s, s);
+  push(raw, raw);
   return cands;
 }
 
@@ -155,25 +221,58 @@ async function setTrackedAddrIds(ids) {
   try { await chrome.storage.local.set({ [ADDR_TRACK_KEY]: ids }); } catch (e) { void e; }
 }
 
-// 옵션 행 finder: 옵션 컨테이너 텍스트는 "M모레(금) 도착보장" 처럼 합쳐져 firstToken 실패 →
-// "textContent 가 정확히 사이즈인 leaf(예: 'M' span)" 를 찾고 그 클릭가능 조상을 반환. 뷰포트 안만.
-function fOptionRow(size) {
-  const s = JSON.stringify(String(size).replace(/\s+/g, '').toUpperCase());
-  // 옵션 텍스트는 "M내일(금) 도착보장" 통짜 → 선두 사이즈 토큰 매칭(뒤가 영숫자/하이픈이면 제외:
-  // "MUSINSA"(로고), "M-65 필드 재킷"(색상변형) 걸러냄). 클릭가능 + 뷰포트 안만.
+// 옵션 행 finder: 드롭다운 행 텍스트는 "M내일(금) 도착보장" 처럼 값+배송문구 통짜 → "행 텍스트가
+// 목표 값으로 시작"으로 매칭. 오탐 방지 2중: ①같은 차원의 더 긴 값이 우선 매칭되면 제외
+// ("2XL" 행이 "XL" 로 안 잡힘) ②값 뒤 문자가 라틴 영숫자면 제외("M"→"MUSINSA" 차단).
+function fOptionRowByValue(value, allValues) {
+  const want = value == null ? null : normOpt(value); // null = 아무 값 행이나(드롭다운 열림 감지용)
+  const all = [...new Set(allValues.map(normOpt).filter(Boolean))].sort((a, b) => b.length - a.length);
   return `(function(){`
-    + `var want=${s};var vh=window.innerHeight;`
-    + `var sizeRe=/^(4XL|3XL|2XL|XL|XS|S|M|L)(?![A-Z0-9-])/;`
-    + `var lead=function(t){var m=String(t||'').replace(/\\s+/g,'').toUpperCase().match(sizeRe);return m?m[1]:null;};`
+    + `var want=${JSON.stringify(want)};var all=${JSON.stringify(all)};var vh=window.innerHeight;`
+    + `var norm=function(t){return String(t||'').replace(/\\s+/g,'').toUpperCase();};`
     + `var isClk=function(e){if(!e||!e.tagName)return false;if(e.tagName==='LI'||e.tagName==='BUTTON'||e.tagName==='A')return true;`
     + `var role=e.getAttribute&&e.getAttribute('role');if(role==='option'||role==='menuitem'||role==='menuitemradio')return true;`
     + `try{return getComputedStyle(e).cursor==='pointer';}catch(_){return false;}};`
     + `var els=document.querySelectorAll('li,button,a,div,span,[role]');var cands=[];`
-    + `for(var i=0;i<els.length;i++){var e=els[i];var t=(e.textContent||'').trim();if(!t||t.length>30)continue;`
-    + `if(lead(t)!==want||!isClk(e))continue;`
-    + `var r=e.getBoundingClientRect();if(r.width<=0||r.height<=0||r.height>90||r.top<0||r.top>vh)continue;cands.push(e);}`
+    + `for(var i=0;i<els.length;i++){var e=els[i];var t=norm(e.textContent);if(!t||t.length>60)continue;`
+    + `var m=null;for(var k=0;k<all.length;k++){if(t.indexOf(all[k])===0){m=all[k];break;}}`
+    + (want === null ? `if(m===null)continue;` : `if(m!==${JSON.stringify(want)})continue;`)
+    // 경계문자: 라틴영숫자("MUSINSA")·쉼표/원("120,730원" 가격 오탐) 이면 옵션 행이 아님.
+    + `var nx=t.charAt(m.length);if(nx&&/[A-Z0-9,원.]/.test(nx))continue;`
+    + `if(!isClk(e))continue;`
+    // 뷰포트 밖도 후보 유지(드롭다운 리스트는 스크롤 컨테이너 — 6개 이상이면 잘림) → reveal 로 노출.
+    + `var r=e.getBoundingClientRect();if(r.width<=0||r.height<=0||r.height>90)continue;cands.push(e);}`
     + `cands.sort(function(a,b){return a.getBoundingClientRect().top-b.getBoundingClientRect().top;});`
     + `return cands[0]||null;})()`;
+}
+
+// 행이 실제로 클릭 가능한지는 rect 만으로 부족 — 드롭다운 리스트는 스크롤 컨테이너라 rect 가
+// 뷰포트 안이어도 리스트 클리핑 밖일 수 있음(그 좌표 클릭은 리스트 뒤 페이지에 떨어짐, 실측).
+// 판정은 elementFromPoint 히트테스트로: 중심점의 최상위 요소가 행(또는 그 자손/조상)이어야 함.
+// 주의: 히트가 el 의 "조상"인 경우, 키 큰 팝업 컨테이너(클리핑 밖 행도 contains)와 행 래퍼를
+// 구분해야 함 → 조상 수용은 높이 <100px(행 크기)일 때만.
+const HIT_TEST_FN = `var hitOk=function(el){var r=el.getBoundingClientRect();`
+  + `if(r.width<=0||r.height<=0||r.top<0||r.bottom>window.innerHeight)return false;`
+  + `var h=document.elementFromPoint(r.left+r.width/2,r.top+r.height/2);`
+  + `if(!h)return false;if(h===el||el.contains(h))return true;`
+  + `return h.contains(el)&&h.getBoundingClientRect().height<100;};`;
+
+// 히트 불가면 팝업 내부 스크롤 컨테이너만 스크롤해 노출(페이지 스크롤 금지 — 페이지가 움직이면
+// Radix 팝업이 닫힘. 컨테이너 scrollTop 조작은 팝업 유지, 라이브 실증).
+function revealRowExpr(rowFinder) {
+  return `(function(){${HIT_TEST_FN}var el=(${rowFinder});if(!el)return 0;`
+    + `if(hitOk(el))return 1;`
+    + `var r=el.getBoundingClientRect();var sc=el.parentElement;`
+    + `while(sc&&sc!==document.body){var st=getComputedStyle(sc);`
+    + `if(/(auto|scroll)/.test(st.overflowY)&&sc.scrollHeight>sc.clientHeight+4)break;sc=sc.parentElement;}`
+    + `if(!sc||sc===document.body)return 0;`
+    + `var sr=sc.getBoundingClientRect();sc.scrollTop+=(r.top-(sr.top+sr.height/2-r.height/2));return 2;})()`;
+}
+// 히트테스트 통과 시에만 좌표 반환(아니면 클릭 금지).
+function centerInViewExpr(finderExpr) {
+  return `(function(){${HIT_TEST_FN}var el=(${finderExpr});if(!el)return null;`
+    + `if(!hitOk(el))return null;var r=el.getBoundingClientRect();`
+    + `return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`;
 }
 
 // 옵션 미발견 시 진단: 화면에 보이는 사이즈-유사 텍스트 요소 덤프.
@@ -190,45 +289,119 @@ function fSizeCandidates(size) {
 }
 
 const F_SELECTED = `(/총\\s*\\d+\\s*개/.test(document.body.innerText||'')) ? 1 : 0`;
-function fDescribe(finderExpr) {
-  return `(function(){var el=(${finderExpr});if(!el)return null;var r=el.getBoundingClientRect();`
-    + `return {tag:el.tagName,text:(el.textContent||'').trim().slice(0,24),top:Math.round(r.top),h:Math.round(r.height)};})()`;
+const DIAG_EXPR = `(function(){var ph=[].map.call(document.querySelectorAll('input[placeholder]'),function(e){return e.placeholder+'='+(e.value||'');}).slice(0,6);`
+  + `var qty=[].map.call(document.querySelectorAll('input'),function(e){var r=e.getBoundingClientRect();return (r.width>0&&r.width<60&&/^\\d+$/.test(e.value||''))?e.value:null;}).filter(Boolean);`
+  + `var m=(document.body.innerText||'').match(/총\\s*\\d+\\s*개[^\\n]{0,20}/);`
+  + `return {url:location.href, inputs:ph, qtyInputs:qty, totalSnippet:m?m[0]:null, ih:window.innerHeight};})()`;
+
+// 차원 하나 선택: 트리거 클릭 → 행 폴링 → 클릭(스크롤 금지). allowOpenRow=true(2번째 차원부터)면
+// 직전 선택으로 자동 열린 팝업의 행을 트리거 없이 바로 클릭(트리거 재클릭이 팝업을 닫는 것 방지).
+async function selectDimValue(tabId, dim, value, allValues) {
+  const rowFinder = fOptionRowByValue(value, allValues);
+  const anyRow = fOptionRowByValue(null, allValues); // 드롭다운 열림 감지(아무 값 행)
+  const trace = { dim, value, trigClicks: 0, rowClicks: 0, verified: false, dropdownSeen: false };
+  const exists = async (f) => !!(await evaluate(tabId, `(${f}) ? 1 : 0`).catch(() => 0));
+  // 선택 반영 신호(실측): 중간 차원은 선택되면 placeholder 입력이 styled div 로 교체돼 사라짐,
+  // 마지막 차원은 아이템 카드 등장(총 N개). 입력칸 value 로는 감지 불가(값이 input 에 안 들어감).
+  const dimDone = `((${F_SELECTED})${dim ? ` || !document.querySelector('input[placeholder='+JSON.stringify(${JSON.stringify(String(dim))})+']')` : ''}) ? 1 : 0`;
+  const trig = fDimTrigger(dim);
+  // 무신사 PDP 는 내비/스크롤 직후 첫 trusted 클릭이 무효되기도 함(실측) → 상태검증+재시도 루프.
+  // 트리거는 "드롭다운이 안 열려 있을 때만" 클릭(열린 상태서 재클릭=토글로 닫혀버리는 레이스 방지).
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let present = await exists(rowFinder);
+    if (!present) {
+      const open = await exists(anyRow);
+      trace.dropdownSeen = trace.dropdownSeen || open;
+      // attempt 2회째부터는 "열림" 판정을 불신하고 트리거를 강행 클릭(열림 오탐 → 영구 대기 방지).
+      if (!open || attempt >= 2) {
+        await waitFor(tabId, `(${trig}) ? 1 : 0`, { timeout: 8000 });
+        await evaluate(tabId, `(function(){var t=(${trig});if(t&&t.scrollIntoView)t.scrollIntoView({block:'center',behavior:'instant'});return 1;})()`).catch(() => {});
+        await sleep(400);
+        try { await clickElement(tabId, trig, '옵션 트리거 ' + dim); trace.trigClicks += 1; } catch (e) { continue; }
+      }
+      const t0 = Date.now();
+      while (Date.now() - t0 < 4000) { present = await exists(rowFinder); if (present) break; await sleep(300); }
+      if (!present) continue; // 안 열렸거나(클릭 무효) 대상 행 없음 → 재시도
+    }
+    // 히트 불가(리스트 클리핑 밖)면 팝업 내부 스크롤로 노출 → 히트테스트 통과 좌표로만 클릭.
+    let c = null;
+    for (let k = 0; k < 3 && !c; k++) {
+      await evaluate(tabId, revealRowExpr(rowFinder)).catch(() => {});
+      await sleep(350);
+      c = await evaluate(tabId, centerInViewExpr(rowFinder)).catch(() => null);
+    }
+    if (!c) continue;
+    await clickAt(tabId, c.x, c.y);
+    trace.rowClicks += 1;
+    try {
+      await waitFor(tabId, dimDone, { timeout: 3000 });
+      trace.verified = true;
+      return { c, trace };
+    } catch (e) { /* 반영 안 됨 → 재시도 */ }
+  }
+  return { c: null, trace };
 }
-const DIAG_EXPR = `(function(){var t=document.querySelector('input[placeholder="사이즈"]');`
-  + `return {url:location.href, sizeValue:t?(t.value||''):null, hasTotal:/총\\s*\\d+\\s*개/.test(document.body.innerText||'')};})()`;
 
 /**
- * 옵션(사이즈) 선택 → 구매하기 → 주문서 도달. CDP trusted 이벤트.
+ * 옵션 확정(API 대조 STRICT) → 차원별 선택 → 수량 → 구매하기 → 주문서 → 배송지 → 결제 직전 정지.
+ * @param {number} tabId  PDP 탭
+ * @param {string|number} goodsNo  무신사 상품번호
+ * @param {string} orderOption  마켓주문 옵션 원문(형식 자유 — 토큰 매칭)
+ * @param {object} opts  {recipient, quantity}
  * @returns {Promise<object>} {ok, stage, ...진단}
  */
-export async function cdpSelectOptionAndBuy(tabId, targetSize, opts = {}) {
+export async function cdpSelectOptionAndBuy(tabId, goodsNo, orderOption, opts = {}) {
   await dbgAttach(tabId);
   try {
     // 0) 탭 렌더 대기(innerHeight>0). 백그라운드/미포커스 탭은 innerHeight=0 이라 좌표 클릭 무효.
     await waitFor(tabId, `window.innerHeight > 100 ? 1 : 0`, { timeout: 10000 }).catch(() => {});
-    // 1) 로드 대기 + 트리거 뷰포트 중앙(팝업이 화면 안에 뜨도록).
-    await waitFor(tabId, `${F_SIZE_TRIGGER} ? 1 : 0`, { timeout: 15000 });
-    await evaluate(tabId, `(function(){var t=${F_SIZE_TRIGGER};if(t&&t.scrollIntoView)t.scrollIntoView({block:'center'});return 1;})()`).catch(() => {});
-    await sleep(400);
-    // 2) 드롭다운 열기(trusted).
-    await clickElement(tabId, F_SIZE_TRIGGER, '사이즈 트리거');
-    // 3) 옵션 등장 폴링(직접) → 실패 시 후보 덤프 반환.
-    const rowFinder = fOptionRow(targetSize);
-    let optCenter = null;
-    const t0 = Date.now();
-    while (Date.now() - t0 < 6000) { optCenter = await centerOf(tabId, rowFinder); if (optCenter) break; await sleep(300); }
-    if (!optCenter) {
-      const sizeCandidates = await evaluate(tabId, fSizeCandidates(targetSize)).catch(() => null);
-      return { ok: false, stage: 'option_not_found', sizeCandidates };
+    // 1) 옵션 메타 로드(API) → 주문 옵션과 STRICT 매칭(모호하면 STOP — 오배송 방지).
+    const meta = await evaluate(tabId, optionsFetchExpr(goodsNo)).catch((e) => ({ ok: false, err: String(e && e.message || e) }));
+    if (!meta || !meta.ok) return { ok: false, stage: 'options_fetch_failed', meta };
+    const matched = matchOptionItem(meta.items, orderOption);
+    if (!matched.item) {
+      return { ok: false, stage: matched.reason === 'ambiguous' ? 'option_ambiguous' : 'option_not_found',
+        tokens: parseOptionTokens(orderOption), dims: meta.dims, itemCount: meta.items.length, hitCount: matched.hitCount };
     }
-    const optionMatched = await evaluate(tabId, fDescribe(rowFinder)).catch(() => null);
-    // 4) 옵션 클릭(스크롤 금지) → 선택 검증(총 N개).
-    await clickAt(tabId, optCenter.x, optCenter.y);
+    const optionMatched = { values: matched.item.values, reason: matched.reason };
+    // 2) 페이지 준비(구매하기 등장) 후 차원별 값 순차 선택(색상 → 사이즈 등).
+    await waitFor(tabId, `(${F_BUY}) ? 1 : 0`, { timeout: 15000 });
+    let clickedDims = 0;
+    const dimTraces = [];
+    for (let i = 0; i < matched.item.values.length; i++) {
+      const dim = meta.dims[i] || '';
+      const value = matched.item.values[i];
+      const allValues = meta.items.map((it) => it.values[i]).filter(Boolean);
+      // 주의: 단일 값 차원(색상 BEG 하나뿐)도 PDP 에 드롭다운이 있고 선택해야 다음 차원이 열림(실측).
+      const sel = await selectDimValue(tabId, dim, value, allValues).catch((e) => ({ c: null, trace: { dim, value, error: String(e && e.message || e) } }));
+      dimTraces.push(sel.trace);
+      if (!sel.c) {
+        // 단일 아이템 상품(FREE/NONE 등)은 선택 UI 가 없을 수 있음 → 선택 생략하고 구매 시도.
+        if (meta.items.length === 1) break;
+        const sizeCandidates = await evaluate(tabId, fSizeCandidates(value)).catch(() => null);
+        return { ok: false, stage: 'option_row_not_found', optionMatched, dim, value, dimTraces, sizeCandidates };
+      }
+      clickedDims += 1;
+      await sleep(400);
+    }
+    // 3) 선택 검증(총 N개). 단일 아이템 + 선택 UI 없음이면 통과(구매하기 실패 시 no_order_form 으로 잡힘).
     let selected = 0;
-    try { selected = await waitFor(tabId, F_SELECTED, { timeout: 4000 }); } catch (e) { selected = 0; }
-    if (!selected) {
+    try { selected = await waitFor(tabId, F_SELECTED, { timeout: 5000 }); } catch (e) { selected = 0; }
+    if (!selected && !(meta.items.length === 1 && clickedDims === 0)) {
       const diag = await evaluate(tabId, DIAG_EXPR).catch(() => null);
-      return { ok: false, stage: 'option_not_selected', optionMatched, diag };
+      return { ok: false, stage: 'option_not_selected', optionMatched, dimTraces, diag };
+    }
+    // 4) 수량(기본 1). 스테퍼 '+' 를 (수량-1)회 → 입력값 검증(미달 주문 방지 fail-loud).
+    const qty = Math.max(1, Math.min(10, Number(opts.quantity) || 1));
+    if (qty > 1) {
+      for (let i = 1; i < qty; i++) {
+        try { await clickElement(tabId, F_QTY_PLUS, '수량 +'); } catch (e) {
+          return { ok: false, stage: 'quantity_plus_not_found', optionMatched, want: qty };
+        }
+        await sleep(250);
+      }
+      const got = await evaluate(tabId, QTY_VALUE_EXPR).catch(() => null);
+      if (Number(got) !== qty) return { ok: false, stage: 'quantity_mismatch', optionMatched, want: qty, got };
     }
     // 5) 구매하기 → 주문서.
     await clickElement(tabId, F_BUY, '구매하기');
@@ -253,8 +426,9 @@ export async function cdpSelectOptionAndBuy(tabId, targetSize, opts = {}) {
       const candidates = buildAddressCandidates(rc.address, rc.addressDetail);
       let addressSave = null;
       const attempts = [];
-      for (const cand of candidates.slice(0, 4)) {
-        const body = { name, mobile, zipcode, address1: cand.address1, address2: cand.address2, isDefault: true, additionalMessage: '', additionalMessageManual: '' };
+      for (const cand of candidates.slice(0, 6)) {
+        // address2 빈 문자열은 saveAction 이 거부(실측) → '-' 폴백.
+        const body = { name, mobile, zipcode, address1: cand.address1, address2: String(cand.address2 || '').trim() || '-', isDefault: true, additionalMessage: '', additionalMessageManual: '' };
         let res = null;
         try { res = await evaluate(tabId, addrPostExpr('saveAction', body)); } catch (e) { res = { status: 0, result: false, id: null, message: String(e && e.message || e) }; }
         attempts.push({ address1: cand.address1, status: res && res.status, message: res && res.message });
