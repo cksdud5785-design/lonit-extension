@@ -73,7 +73,16 @@ async function clickElement(tabId, finderExpr, label) {
 }
 
 // ---- finder 식(페이지 컨텍스트) ----
-const F_BUY = `[].find.call(document.querySelectorAll('button'),function(b){return (b.textContent||'').trim()==='구매하기'})`;
+// 구매 CTA: 보통 "구매하기" 지만 타임세일/기획전 상품은 "타임세일 종료까지 N일" 등으로 바뀜(실측).
+// → ①정확 "구매하기" ②알려진 변형 ③"장바구니" 버튼의 형제 버튼(장바구니 옆 검정 CTA = 구매).
+const F_BUY = `(function(){`
+  + `var btns=[].slice.call(document.querySelectorAll('button'));`
+  + `var exact=btns.find(function(b){return (b.textContent||'').trim()==='구매하기';});if(exact)return exact;`
+  + `var variant=btns.find(function(b){var t=(b.textContent||'').replace(/\\s+/g,'');`
+  + `return /^구매하기|바로구매|선물하기|타임세일.*종료|종료까지.*(구매|구입)|지금구매/.test(t)&&!/장바구니/.test(t);});if(variant)return variant;`
+  + `var cart=btns.find(function(b){return (b.textContent||'').trim()==='장바구니';});`
+  + `if(cart){var p=cart.parentElement;var sib=p&&[].find.call(p.children,function(c){return c.tagName==='BUTTON'&&c!==cart&&(c.textContent||'').trim().indexOf('좋아요')<0;});if(sib)return sib;}`
+  + `return null;})()`;
 
 // ---- 옵션 매칭(STRICT, spec ⑥) ----
 // 마켓주문 옵션 문자열("옵션:BEG/095-1개", "…, 120, 기타 x1", "사이즈: 270", "WHT/000" 등)을
