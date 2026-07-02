@@ -534,3 +534,9 @@ export async function cdpSelectOptionAndBuy(tabId, goodsNo, orderOption, opts = 
     await dbgDetach(tabId);
   }
 }
+
+// ── 롯데온 등 타 벤더 CDP 드라이버에서 재사용하기 위한 저수준 프리미티브 export ──
+export {
+  dbgAttach, dbgDetach, evaluate, waitFor, clickAt, centerOf, clickElement,
+  normPhone, addrPostExpr, getTrackedAddrIds, setTrackedAddrIds, sidoVariants,
+};

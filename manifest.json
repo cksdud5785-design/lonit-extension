@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Lonit Product Collector",
-  "version": "1.7.23",
+  "version": "1.7.24",
   "description": "Lonit source product collection and market sync extension",
   "permissions": [
     "storage",

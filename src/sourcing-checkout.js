@@ -4,6 +4,7 @@
 // spec: docs/superpowers/specs/2026-07-01-sourcing-order-autofill-design.md (§9)
 import { apiCall } from './api.js';
 import { cdpSelectOptionAndBuy } from './cdp-driver.js';
+import { cdpLotteonOptionAndBuy } from './lotteon-checkout.js';
 
 // externally_connectable 로 허용된 정확한 오리진만 신뢰(least privilege).
 const ALLOWED_ORIGIN = 'https://www.lonit.kr';
@@ -61,30 +62,32 @@ export function registerSourcingExternalHandler() {
           // ★응답은 탭 오픈 직후 즉시 ack — 전체 플로우(30~60s)를 기다리면 웹 sendMessage 가
           //   타임아웃돼 "확장 실행 실패"로 오판. 진행/결과는 열린 탭에서 사용자가 보고,
           //   최종 결과는 lastCdpResult(storage, GET_LAST_RESULT)로 남긴다.
-          if (d.vendor === 'musinsa' && goodsNo && d.recipient) {
-            const rc = d.recipient;
-            // 배송 정보: 서버 payload(주문자 정보)가 기본. 팝업에서 "직접 입력"을 선택하면 msg.recipient
-            //   로 커스텀 값이 오며, 값이 있는 필드만 덮어쓴다(예: 0504 안심번호 → 사용자가 실번호 입력).
-            const ov = msg.recipient || {};
-            const pick = (a, b) => (a != null && String(a).trim() !== '' ? a : b);
-            const recipient = {
-              name: pick(ov.name, rc.name),
-              phone: pick(ov.phone, rc.phone),
-              zipcode: pick(ov.zipCode ?? ov.zipcode, rc.zipCode),
-              address: pick(ov.address, rc.address),
-              addressDetail: pick(ov.addressDetail, rc.addressDetail),
-            };
+          // 배송 정보: 서버 payload(주문자 정보)가 기본. 팝업 "직접 입력" 시 msg.recipient 로 커스텀 값이
+          //   오며 값 있는 필드만 덮어쓴다(0504 안심번호 → 사용자가 실번호 입력 등). 벤더 무관 공통.
+          const ov = msg.recipient || {};
+          const pick = (a, b) => (a != null && String(a).trim() !== '' ? a : b);
+          const rc = d.recipient || {};
+          const recipient = {
+            name: pick(ov.name, rc.name),
+            phone: pick(ov.phone, rc.phone),
+            zipcode: pick(ov.zipCode ?? ov.zipcode, rc.zipCode),
+            address: pick(ov.address, rc.address),
+            addressDetail: pick(ov.addressDetail, rc.addressDetail),
+          };
+          const runCdp = async (fn) => {
             const tab = await chrome.tabs.create({ url: sourceUrl, active: true });
             try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
             try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }
             sendResponse({ ok: true, phase: 'cdp', accepted: true });
-            try {
-              await waitTabComplete(tab.id);
-              const r = await cdpSelectOptionAndBuy(tab.id, goodsNo, d.option || '', { recipient, quantity: d.quantity });
-              await chrome.storage.local.set({ lastCdpResult: { at: Date.now(), orderId, res: r } });
-            } catch (err) {
-              try { await chrome.storage.local.set({ lastCdpResult: { at: Date.now(), orderId, res: { ok: false, error: err && err.message ? err.message : 'cdp failed' } } }); } catch (e2) { void e2; }
-            }
+            try { await waitTabComplete(tab.id); const r = await fn(tab.id); await chrome.storage.local.set({ lastCdpResult: { at: Date.now(), orderId, res: r } }); }
+            catch (err) { try { await chrome.storage.local.set({ lastCdpResult: { at: Date.now(), orderId, res: { ok: false, error: err && err.message ? err.message : 'cdp failed' } } }); } catch (e2) { void e2; } }
+          };
+          if (d.vendor === 'musinsa' && goodsNo && d.recipient) {
+            await runCdp((tabId) => cdpSelectOptionAndBuy(tabId, goodsNo, d.option || '', { recipient, quantity: d.quantity }));
+            return;
+          }
+          if (d.vendor === 'lotteon' && d.recipient) {
+            await runCdp((tabId) => cdpLotteonOptionAndBuy(tabId, sourceUrl, d.option || '', { recipient }));
             return;
           }
           // 폴백: 미지원 벤더/조건 미충족 → 보이는 탭 open(사용자 수동 진행/결제).
@@ -125,9 +128,30 @@ export function registerSourcingExternalHandler() {
       return true; // 비동기 sendResponse 유지
     }
 
+    // dev 테스트: 롯데온 옵션선택→바로구매→주문서→배송지(결제 직전 정지). url/option/recipient 직접 지정.
+    if (msg && msg.type === 'LOTTEON_TEST') {
+      const url = String(msg.url || '');
+      const option = String(msg.option || '').trim().slice(0, 200);
+      const recipient = msg.recipient || null;
+      if (!url) { sendResponse({ ok: false, error: 'url required' }); return; }
+      (async () => {
+        let res = null;
+        try {
+          const tab = await chrome.tabs.create({ url, active: true });
+          try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
+          try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }
+          await waitTabComplete(tab.id);
+          res = await cdpLotteonOptionAndBuy(tab.id, url, option, { recipient });
+        } catch (err) { res = { ok: false, error: err && err.message ? err.message : 'lotteon test failed' }; }
+        try { await chrome.storage.local.set({ lastCdpResult: { at: Date.now(), res } }); } catch (e) { void e; }
+        try { sendResponse(res); } catch (e) { void e; }
+      })();
+      return true;
+    }
+
     // dev: 마지막 CDP 테스트 결과 조회(응답 채널 유실 시 폴백).
     if (msg && msg.type === 'GET_LAST_RESULT') {
-      chrome.storage.local.get('lastCdpResult', (o) => { sendResponse(o && o.lastCdpResult ? o.lastCdpResult : null); });
+      chrome.storage.local.get(['lastCdpResult'], (o) => { sendResponse(o && o.lastCdpResult ? o.lastCdpResult : null); });
       return true;
     }
 
