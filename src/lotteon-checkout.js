@@ -5,7 +5,7 @@
 // 배송지 API(실측): POST pbf.lotteon.com/member/v1/delivery/registerMemberDelivery (bseDvpYn:'Y' → 기본지정,
 //   strSeq=새 dvpSn 반환, 항상 신규생성). 정리: POST /member/v1/deleteMemberDeliveryList (주소객체 전체).
 
-import { dbgAttach, dbgDetach, evaluate, waitFor, clickAt, clickElement, buildAddressCandidates, normPhone, getTrackedAddrIds, setTrackedAddrIds } from './cdp-driver.js';
+import { dbgAttach, dbgDetach, evaluate, waitFor, clickAt, clickElement, buildAddressCandidates, getTrackedAddrIds, setTrackedAddrIds } from './cdp-driver.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PBF = 'https://pbf.lotteon.com';
@@ -74,41 +74,54 @@ async function selectLotteonDim(tabId, i, label, allLabels) {
     + `for(var k=0;k<lis.length;k++){var li=lis[k];var t=norm(li.textContent);var m=null;`
     + `for(var x=0;x<all.length;x++){if(t.indexOf(norm(all[x]))===0){m=all[x];break;}}`
     + `if(m===want && !/disabled/.test(li.className) && !/\\[품절\\]/.test(li.textContent||''))return li;}return null;})()`;
-  // 트리거가 이미 선택 라벨을 보이면 스킵(단일값 등).
-  for (let attempt = 0; attempt < 3; attempt++) {
-    // 1) 드롭다운 열기.
-    await evaluate(tabId, `(function(){var t=${trig};if(t&&t.scrollIntoView)t.scrollIntoView({block:'center'});return 1;})()`).catch(() => {});
-    await sleep(350);
-    await clickElement(tabId, trig, '옵션 트리거 ' + i).catch(() => {});
-    await sleep(500);
-    // 2) li 등장 대기 → 뷰포트로 스크롤 → 뷰포트 안 좌표 클릭(off-screen 클릭은 미반영).
-    let present = false; const t0 = Date.now();
-    while (Date.now() - t0 < 4000) { present = !!(await evaluate(tabId, `(${liSel}) ? 1 : 0`).catch(() => 0)); if (present) break; await sleep(300); }
-    if (!present) continue;
+  const selectedExpr = `(function(){var w=${wrap};if(!w)return 0;var sr=w.querySelector('.selectResult');`
+    + `return sr && (sr.textContent||'').replace(/\\s+/g,'').toUpperCase().indexOf(${JSON.stringify(label)}.replace(/\\s+/g,'').toUpperCase())>=0 ? 1:0;})()`;
+  // 트리거/래퍼가 렌더될 때까지 대기(페이지 정착).
+  await waitFor(tabId, `(${trig}) ? 1 : 0`, { timeout: 8000 }).catch(() => {});
+  // 이미 선택돼 있으면(단일값 자동선택 등) 통과.
+  if (await evaluate(tabId, selectedExpr).catch(() => 0)) return true;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    // 1) 드롭다운 열기: 트리거 클릭 후 li 등장 확인, 안 열리면 트리거 재클릭(어택트당 2회).
+    let present = false;
+    for (let open = 0; open < 2 && !present; open++) {
+      await evaluate(tabId, `(function(){var t=${trig};if(t&&t.scrollIntoView)t.scrollIntoView({block:'center'});return 1;})()`).catch(() => {});
+      await sleep(300);
+      const tc = await evaluate(tabId, `(function(){var t=${trig};if(!t)return null;var r=t.getBoundingClientRect();if(r.top<0||r.bottom>window.innerHeight||r.width<=0)return null;return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`).catch(() => null);
+      if (tc) await clickAt(tabId, tc.x, tc.y); else await clickElement(tabId, trig, '옵션 트리거 ' + i).catch(() => {});
+      const t0 = Date.now();
+      while (Date.now() - t0 < 3000) { present = !!(await evaluate(tabId, `(${liSel}) ? 1 : 0`).catch(() => 0)); if (present) break; await sleep(250); }
+    }
+    if (!present) { await sleep(400); continue; }
+    // 2) li 뷰포트 스크롤 → 뷰포트 안 좌표 클릭(off-screen 좌표클릭은 Vue 미반영).
     await evaluate(tabId, `(function(){var el=${liSel};if(el&&el.scrollIntoView)el.scrollIntoView({block:'center'});return 1;})()`).catch(() => {});
     await sleep(300);
     const c = await evaluate(tabId, `(function(){var el=${liSel};if(!el)return null;var r=el.getBoundingClientRect();if(r.top<0||r.bottom>window.innerHeight||r.width<=0)return null;return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`).catch(() => null);
-    if (!c) continue;
+    if (!c) { await sleep(300); continue; }
     await clickAt(tabId, c.x, c.y);
     await sleep(600);
     // 3) 반영 검증: 해당 wrap .selectResult 텍스트에 라벨 포함?
-    const ok = await evaluate(tabId, `(function(){var w=${wrap};if(!w)return 0;var sr=w.querySelector('.selectResult');`
-      + `return sr && (sr.textContent||'').replace(/\\s+/g,'').toUpperCase().indexOf(${JSON.stringify(label)}.replace(/\\s+/g,'').toUpperCase())>=0 ? 1:0;})()`).catch(() => 0);
-    if (ok) return true;
+    if (await evaluate(tabId, selectedExpr).catch(() => 0)) return true;
   }
   return false;
+}
+
+// 롯데온 전화 정규화: 무신사와 달리 롯데온 배송지 API 는 0502/0504 안심번호(마켓 중계번호)를
+//   그대로 수용한다(라이브 실증 2026-07-03) — 롯데온 소싱 주문 수령인 전화는 사실상 100% 안심번호라
+//   01X-only(normPhone) 로 거르면 전건 실패한다. 숫자만 추출해 9~12자리면 그대로 사용(010/070/0502/0504).
+function lotteonPhone(p) {
+  const d = String(p || '').replace(/\D/g, '');
+  return (d.length >= 9 && d.length <= 12) ? d : '';
 }
 
 // 롯데온 배송지 등록(고객주소, 기본지정). raw 주소 수용. 후보 사다리+백오프(무신사 대응). 반환 {ok,dvpSn,attempts}
 async function registerLotteonAddress(tabId, rc) {
   const name = String(rc.name || '').trim();
-  const mobile = normPhone(rc.phone);
+  const mphn = lotteonPhone(rc.phone); // 안심번호 포함 숫자 그대로(하이픈 없이)
   const zipcode = String(rc.zipcode || '').replace(/\D/g, '');
-  if (rc.phone && !mobile) return { ok: false, stage: 'invalid_phone', phone: String(rc.phone) };
-  if (!name || !mobile || zipcode.length !== 5 || !String(rc.address || '').trim()) {
-    return { ok: false, stage: 'recipient_incomplete', missing: { name: !name, mobile: !mobile, zipcode: zipcode.length !== 5, address: !String(rc.address || '').trim() } };
+  if (rc.phone && !mphn) return { ok: false, stage: 'invalid_phone', phone: String(rc.phone) };
+  if (!name || !mphn || zipcode.length !== 5 || !String(rc.address || '').trim()) {
+    return { ok: false, stage: 'recipient_incomplete', missing: { name: !name, mobile: !mphn, zipcode: zipcode.length !== 5, address: !String(rc.address || '').trim() } };
   }
-  const mphn = mobile.replace(/\D/g, ''); // 하이픈 없이
   const cands = buildAddressCandidates(rc.address, rc.addressDetail).slice(0, 4);
   const attempts = [];
   const regExpr = (a1, a2) => `(async function(){try{`
@@ -145,6 +158,46 @@ async function cleanupLotteonAddresses(tabId, keepDvpSn) {
   await setTrackedAddrIds([keepDvpSn, ...(Array.isArray(remaining) ? remaining : [])]);
 }
 
+// 주문서 "변경" 모달을 열어 고객 주소(name/dvpSn)를 선택. 셀러가 base 자동선택 안 할 때 사용.
+// 반환: 진단용 모달 덤프({radios, buttons, clickedRow, clickedConfirm}).
+async function ensureAddressSelected(tabId, name, dvpSn) {
+  // 배송지 미선택 시 버튼은 "선택", 선택됨 시 "변경". 배송정보 영역(.deliveryWrap) 내로 한정.
+  const changeFinder = `(function(){var scope=document.querySelector('.deliveryWrap')||document;`
+    + `return [].find.call(scope.querySelectorAll('.btnAddress,button,a'),function(b){var t=(b.textContent||'').trim();return t==='변경'||t==='선택';})||null;})()`;
+  const btnInfo = await evaluate(tabId, `(function(){var b=${changeFinder};if(!b)return {found:false};var r=b.getBoundingClientRect();return {found:true,tag:b.tagName,txt:(b.textContent||'').trim().slice(0,10),y:Math.round(r.top),h:Math.round(r.height)};})()`).catch(() => ({ err: 1 }));
+  await evaluate(tabId, `(function(){var b=${changeFinder};if(b&&b.scrollIntoView)b.scrollIntoView({block:'center'});return 1;})()`).catch(() => {});
+  await sleep(500);
+  const cc = await evaluate(tabId, `(function(){var b=${changeFinder};if(!b)return null;var r=b.getBoundingClientRect();if(r.top<0||r.bottom>window.innerHeight||r.width<=0)return null;return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`).catch(() => null);
+  if (cc) await clickAt(tabId, cc.x, cc.y); else await clickElement(tabId, changeFinder, '배송지 선택/변경').catch(() => {});
+  // 모달 등장 대기.
+  await waitFor(tabId, `document.querySelector('.v--modal-box') ? 1 : 0`, { timeout: 6000 }).catch(() => {});
+  await sleep(800);
+  // 우리 주소 행(name 포함하는 label/li) 클릭 → 확인/적용 버튼 클릭.
+  const rowFinder = `(function(){var box=document.querySelector('.v--modal-box');if(!box)return null;`
+    + `var rows=box.querySelectorAll('label,li,.deliveryItem,[class*="item"]');`
+    + `for(var k=0;k<rows.length;k++){var t=rows[k].textContent||'';if(t.indexOf(${JSON.stringify(name)})>=0){var r=rows[k].getBoundingClientRect();if(r.width>0&&r.height>0)return rows[k];}}return null;})()`;
+  const rowState = await evaluate(tabId, `(function(){var el=${rowFinder};if(!el)return null;var r=el.getBoundingClientRect();return {y:Math.round(r.top),h:Math.round(r.height)};})()`).catch(() => null);
+  let clickedRow = false;
+  if (rowState) {
+    await evaluate(tabId, `(function(){var el=${rowFinder};if(el&&el.scrollIntoView)el.scrollIntoView({block:'center'});return 1;})()`).catch(() => {});
+    await sleep(300);
+    const rc = await evaluate(tabId, `(function(){var el=${rowFinder};if(!el)return null;var r=el.getBoundingClientRect();if(r.top<0||r.bottom>window.innerHeight)return null;return {x:Math.round(r.left+30),y:Math.round(r.top+r.height/2)};})()`).catch(() => null);
+    if (rc) { await clickAt(tabId, rc.x, rc.y); clickedRow = true; await sleep(500); }
+  }
+  // 확인/적용/선택 버튼(새배송지추가·임직원·취소 제외).
+  const confirmFinder = `(function(){var box=document.querySelector('.v--modal-box');if(!box)return null;`
+    + `var bs=box.querySelectorAll('button,a');for(var k=0;k<bs.length;k++){var t=(bs[k].textContent||'').replace(/\\s+/g,'');`
+    + `if(/^(확인|적용|선택|배송지선택|배송지변경|이배송지로배송)$/.test(t)){var r=bs[k].getBoundingClientRect();if(r.width>0&&r.height>0)return bs[k];}}return null;})()`;
+  const dump = await evaluate(tabId, `(function(){var box=document.querySelector('.v--modal-box');if(!box)return {noModal:true};`
+    + `var radios=[].map.call(box.querySelectorAll('label,li'),function(e){return (e.textContent||'').replace(/\\s+/g,' ').trim().slice(0,40);}).filter(Boolean).slice(0,12);`
+    + `var buttons=[].map.call(box.querySelectorAll('button,a'),function(e){return (e.textContent||'').trim();}).filter(Boolean).slice(0,14);`
+    + `return {radios:radios, buttons:buttons};})()`).catch(() => null);
+  let clickedConfirm = false;
+  const confState = await evaluate(tabId, `(function(){var el=${confirmFinder};if(!el)return null;var r=el.getBoundingClientRect();return {t:(el.textContent||'').trim(),x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};})()`).catch(() => null);
+  if (confState && confState.y >= 0 && confState.y <= 900) { await clickAt(tabId, confState.x, confState.y); clickedConfirm = true; await sleep(1500); }
+  return { btnInfo, clickCoord: cc, clickedRow, clickedConfirm, confirmBtn: confState && confState.t, dump };
+}
+
 /**
  * 롯데온: 옵션 선택 → 바로구매 → 주문서 → 배송지(고객주소 기본지정) → 결제 직전 정지.
  * @param {number} tabId  PDP 탭(이미 열림)
@@ -172,7 +225,22 @@ export async function cdpLotteonOptionAndBuy(tabId, url, orderOption, opts = {})
       const ok = await selectLotteonDim(tabId, i, matched.item.labels[i], allLabels).catch(() => false);
       if (!ok) return { ok: false, stage: 'option_select_failed', dimIndex: i, label: matched.item.labels[i], optionMatched };
     }
-    // 3) 바로 구매하기 → 주문서(scrollIntoView + 뷰포트 클릭, 재시도).
+    // 3) 배송지 선등록: 바로구매 전에 고객주소를 기본배송지로 등록 → 주문서가 처음부터 고객주소로 로드
+    //    (일회성 주문서 reload 는 세션 리다이렉트로 취약하므로 회피). 등록 확인은 API(bseDvpYn)로 결정론.
+    let regInfo = null;
+    if (opts.recipient) {
+      const reg = await registerLotteonAddress(tabId, opts.recipient);
+      if (!reg.ok) return { ...reg, optionMatched };
+      await cleanupLotteonAddresses(tabId, reg.dvpSn).catch(() => {});
+      const isBase = await evaluate(tabId, `(async function(){try{`
+        + `var l=await fetch('${PBF}/order/v1/orderSheetVue/getMemberDeliveryPlaceList?_='+Date.now(),{credentials:'include'}).then(function(x){return x.json();});`
+        + `var arr=Array.isArray(l.data)?l.data:((l.data&&l.data.list)||[]);`
+        + `var m=arr.filter(function(a){return String(a.dvpSn)===${JSON.stringify(String(reg.dvpSn))};})[0];`
+        + `return m&&m.bseDvpYn==='Y'?1:0;}catch(e){return 0;}})()`).catch(() => 0);
+      if (!isBase) return { ok: false, stage: 'address_not_base', dvpSn: reg.dvpSn, optionMatched, attempts: reg.attempts };
+      regInfo = reg;
+    }
+    // 4) 바로 구매하기 → 주문서(scrollIntoView + 뷰포트 클릭, 재시도).
     const buyFinder = `(function(){var bs=[].filter.call(document.querySelectorAll('button'),function(b){return (b.textContent||'').replace(/\\s+/g,'').indexOf('바로구매')===0;});`
       + `var vh=window.innerHeight;var iv=bs.filter(function(b){var r=b.getBoundingClientRect();return r.top>=0&&r.bottom<=vh;});return (iv[0]||bs[0])||null;})()`;
     let reached = false;
@@ -183,20 +251,21 @@ export async function cdpLotteonOptionAndBuy(tabId, url, orderOption, opts = {})
       if (bc) await clickAt(tabId, bc.x, bc.y); else await clickElement(tabId, buyFinder, '바로구매').catch(() => {});
       try { await waitFor(tabId, `location.href.indexOf('${ORDER_SHEET_RE}')>=0 ? 1 : 0`, { timeout: 9000 }); reached = true; } catch (e) { await sleep(600); }
     }
-    if (!reached) return { ok: false, stage: 'no_order_form', optionMatched };
+    if (!reached) return { ok: false, stage: 'no_order_form', optionMatched, dvpSn: regInfo && regInfo.dvpSn };
     await sleep(2500);
-    // 4) 배송지: 고객주소 등록(기본지정) → 정리 → 주문서 재로드 → 수령인 표시 검증.
-    if (opts.recipient) {
-      const reg = await registerLotteonAddress(tabId, opts.recipient);
-      if (!reg.ok) return { ...reg, optionMatched };
-      await cleanupLotteonAddresses(tabId, reg.dvpSn).catch(() => {});
-      await evaluate(tabId, 'location.reload()').catch(() => {});
-      await sleep(2500);
-      await waitFor(tabId, `(location.href.indexOf('${ORDER_SHEET_RE}')>=0 && !!document.body) ? 1 : 0`, { timeout: 15000 }).catch(() => {});
-      let shown = 0;
-      try { shown = await waitFor(tabId, `((document.querySelector('.deliveryWrap')||document.body).textContent||'').indexOf(${JSON.stringify(String(opts.recipient.name || '__none__'))})>=0 ? 1 : 0`, { timeout: 8000 }); } catch (e) { shown = 0; }
-      if (!shown) return { ok: false, stage: 'recipient_not_shown', optionMatched, dvpSn: reg.dvpSn, attempts: reg.attempts };
-      return { ok: true, stage: 'delivery_set', optionMatched, dvpSn: reg.dvpSn, address1: reg.address1 };
+    // 5) 주문서에서 고객 배송지 선택 확인. 셀러에 따라 base 자동표시 안 되고 "배송지를 선택해 주세요"만
+    //    뜨는 경우가 있어, 미표시 시 "변경" 모달을 열어 우리 주소를 선택한다.
+    if (regInfo) {
+      const nm = String(opts.recipient.name || '__none__');
+      const shownExpr = `((document.querySelector('.deliveryWrap')||{}).textContent||'').indexOf(${JSON.stringify(nm)})>=0 ? 1 : 0`;
+      let shown = await waitFor(tabId, shownExpr, { timeout: 6000 }).catch(() => 0);
+      let modalDump = null;
+      if (!shown) {
+        modalDump = await ensureAddressSelected(tabId, nm, regInfo.dvpSn).catch((e) => ({ err: String(e) }));
+        shown = await waitFor(tabId, shownExpr, { timeout: 6000 }).catch(() => 0);
+      }
+      const deliveryText = await evaluate(tabId, `(function(){var d=document.querySelector('.deliveryWrap');return d?(d.textContent||'').replace(/\\s+/g,' ').trim().slice(0,140):null;})()`).catch(() => null);
+      return { ok: true, stage: 'delivery_set', optionMatched, dvpSn: regInfo.dvpSn, address1: regInfo.address1, recipientShown: !!shown, deliveryText, modalDump };
     }
     return { ok: true, stage: 'order_form', optionMatched };
   } catch (e) {

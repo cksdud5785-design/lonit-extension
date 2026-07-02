@@ -134,16 +134,20 @@ export function registerSourcingExternalHandler() {
       const option = String(msg.option || '').trim().slice(0, 200);
       const recipient = msg.recipient || null;
       if (!url) { sendResponse({ ok: false, error: 'url required' }); return; }
+      const closeTab = msg.keepTab ? false : true;
       (async () => {
-        let res = null;
+        let res = null; let tabId = null;
         try {
-          const tab = await chrome.tabs.create({ url, active: true });
+          // 이전 테스트로 누적된 롯데온 주문서 탭 정리(리소스/CDP 충돌 방지).
+          try { const olds = await chrome.tabs.query({ url: 'https://www.lotteon.com/p/order/*' }); for (const t of olds) { try { await chrome.tabs.remove(t.id); } catch (e) { void e; } } } catch (e) { void e; }
+          const tab = await chrome.tabs.create({ url, active: true }); tabId = tab.id;
           try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
           try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }
           await waitTabComplete(tab.id);
           res = await cdpLotteonOptionAndBuy(tab.id, url, option, { recipient });
         } catch (err) { res = { ok: false, error: err && err.message ? err.message : 'lotteon test failed' }; }
         try { await chrome.storage.local.set({ lastCdpResult: { at: Date.now(), res } }); } catch (e) { void e; }
+        if (closeTab && tabId != null) { try { await chrome.tabs.remove(tabId); } catch (e) { void e; } }
         try { sendResponse(res); } catch (e) { void e; }
       })();
       return true;
