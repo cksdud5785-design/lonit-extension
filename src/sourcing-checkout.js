@@ -138,8 +138,9 @@ export function registerSourcingExternalHandler() {
       (async () => {
         let res = null; let tabId = null;
         try {
-          // 이전 테스트로 누적된 롯데온 주문서 탭 정리(리소스/CDP 충돌 방지).
-          try { const olds = await chrome.tabs.query({ url: 'https://www.lotteon.com/p/order/*' }); for (const t of olds) { try { await chrome.tabs.remove(t.id); } catch (e) { void e; } } } catch (e) { void e; }
+          // 이전 테스트로 누적된 롯데온 탭 전부 정리(리소스/CDP 충돌 방지). 테스트 전용.
+          try { const olds = await chrome.tabs.query({ url: 'https://www.lotteon.com/*' }); for (const t of olds) { try { await chrome.tabs.remove(t.id); } catch (e) { void e; } } } catch (e) { void e; }
+          await new Promise((r) => setTimeout(r, 800));
           const tab = await chrome.tabs.create({ url, active: true }); tabId = tab.id;
           try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
           try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }

@@ -226,18 +226,14 @@ export async function cdpLotteonOptionAndBuy(tabId, url, orderOption, opts = {})
       if (!ok) return { ok: false, stage: 'option_select_failed', dimIndex: i, label: matched.item.labels[i], optionMatched };
     }
     // 3) 배송지 선등록: 바로구매 전에 고객주소를 기본배송지로 등록 → 주문서가 처음부터 고객주소로 로드
-    //    (일회성 주문서 reload 는 세션 리다이렉트로 취약하므로 회피). 등록 확인은 API(bseDvpYn)로 결정론.
+    //    (auto-select 셀러). registerMemberDelivery SUCCESS 를 신뢰하고 진행 — base 즉시조회는 전파
+    //    지연으로 거짓음성(address_not_base)이 나 주문페이지 진입을 막았으므로 게이트 제거, 전파만 대기.
     let regInfo = null;
     if (opts.recipient) {
       const reg = await registerLotteonAddress(tabId, opts.recipient);
       if (!reg.ok) return { ...reg, optionMatched };
       await cleanupLotteonAddresses(tabId, reg.dvpSn).catch(() => {});
-      const isBase = await evaluate(tabId, `(async function(){try{`
-        + `var l=await fetch('${PBF}/order/v1/orderSheetVue/getMemberDeliveryPlaceList?_='+Date.now(),{credentials:'include'}).then(function(x){return x.json();});`
-        + `var arr=Array.isArray(l.data)?l.data:((l.data&&l.data.list)||[]);`
-        + `var m=arr.filter(function(a){return String(a.dvpSn)===${JSON.stringify(String(reg.dvpSn))};})[0];`
-        + `return m&&m.bseDvpYn==='Y'?1:0;}catch(e){return 0;}})()`).catch(() => 0);
-      if (!isBase) return { ok: false, stage: 'address_not_base', dvpSn: reg.dvpSn, optionMatched, attempts: reg.attempts };
+      await sleep(1000); // base 전파 대기(주문서가 새 base 로 로드되도록)
       regInfo = reg;
     }
     // 4) 바로 구매하기 → 주문서(scrollIntoView + 뷰포트 클릭, 재시도).
