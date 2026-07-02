@@ -161,9 +161,15 @@ async function cleanupLotteonAddresses(tabId, keepDvpSn) {
 // 주문서 "변경" 모달을 열어 고객 주소(name/dvpSn)를 선택. 셀러가 base 자동선택 안 할 때 사용.
 // 반환: 진단용 모달 덤프({radios, buttons, clickedRow, clickedConfirm}).
 async function ensureAddressSelected(tabId, name, dvpSn) {
-  // 배송지 미선택 시 버튼은 "선택", 선택됨 시 "변경". 배송정보 영역(.deliveryWrap) 내로 한정.
-  const changeFinder = `(function(){var scope=document.querySelector('.deliveryWrap')||document;`
-    + `return [].find.call(scope.querySelectorAll('.btnAddress,button,a'),function(b){var t=(b.textContent||'').trim();return t==='변경'||t==='선택';})||null;})()`;
+  // 배송지 미선택 시 버튼은 "선택", 선택됨 시 "변경". 셀러마다 컨테이너가 달라(.deliveryWrap 없을 수도)
+  //   배송 관련 영역(deliver/배송/receiver)의 버튼 중 정확히 "변경"|"선택"인 것을 문서 전역에서 찾는다.
+  const changeFinder = `(function(){`
+    + `var bs=[].filter.call(document.querySelectorAll('.btnAddress,button,a'),function(b){var t=(b.textContent||'').trim();return t==='변경'||t==='선택';});`
+    + `if(!bs.length)return null;`
+    + `function near(el){var p=el;for(var i=0;i<6&&p;i++){var c=(p.className&&p.className.baseVal!==undefined?p.className.baseVal:p.className)||'';if(/deliver|Deliver|배송|receiver|Receiver|dlvp/i.test(String(c)))return true;p=p.parentElement;}return false;}`
+    + `var scoped=bs.filter(near);var pool=scoped.length?scoped:bs;`
+    + `var vis=pool.filter(function(b){var r=b.getBoundingClientRect();return r.width>0&&r.height>0;});`
+    + `return (vis[0]||pool[0])||null;})()`;
   const btnInfo = await evaluate(tabId, `(function(){var b=${changeFinder};if(!b)return {found:false};var r=b.getBoundingClientRect();return {found:true,tag:b.tagName,txt:(b.textContent||'').trim().slice(0,10),y:Math.round(r.top),h:Math.round(r.height)};})()`).catch(() => ({ err: 1 }));
   await evaluate(tabId, `(function(){var b=${changeFinder};if(b&&b.scrollIntoView)b.scrollIntoView({block:'center'});return 1;})()`).catch(() => {});
   await sleep(500);
@@ -172,17 +178,20 @@ async function ensureAddressSelected(tabId, name, dvpSn) {
   // 모달 등장 대기.
   await waitFor(tabId, `document.querySelector('.v--modal-box') ? 1 : 0`, { timeout: 6000 }).catch(() => {});
   await sleep(800);
-  // 우리 주소 행(name 포함하는 label/li) 클릭 → 확인/적용 버튼 클릭.
+  // 우리 주소의 라디오 input 을 직접 클릭(라벨 클릭은 선택 미반영일 수 있음). name 포함하는 행의 radio.
+  //   라디오가 시각적으로 없으면(커스텀 UI) 라벨/행을 폴백 클릭.
   const rowFinder = `(function(){var box=document.querySelector('.v--modal-box');if(!box)return null;`
-    + `var rows=box.querySelectorAll('label,li,.deliveryItem,[class*="item"]');`
-    + `for(var k=0;k<rows.length;k++){var t=rows[k].textContent||'';if(t.indexOf(${JSON.stringify(name)})>=0){var r=rows[k].getBoundingClientRect();if(r.width>0&&r.height>0)return rows[k];}}return null;})()`;
-  const rowState = await evaluate(tabId, `(function(){var el=${rowFinder};if(!el)return null;var r=el.getBoundingClientRect();return {y:Math.round(r.top),h:Math.round(r.height)};})()`).catch(() => null);
+    + `var radios=box.querySelectorAll('input[type="radio"]');`
+    + `for(var k=0;k<radios.length;k++){var row=radios[k];for(var d=0;d<6&&row;d++){if((row.textContent||'').indexOf(${JSON.stringify(name)})>=0)break;row=row.parentElement;}`
+    + `if(row&&(row.textContent||'').indexOf(${JSON.stringify(name)})>=0){var lbl=radios[k].id?box.querySelector('label[for="'+radios[k].id+'"]'):null;var target=lbl||radios[k];var r=target.getBoundingClientRect();if(r.width>0&&r.height>0)return target;return radios[k];}}`
+    + `var rows=box.querySelectorAll('label,li,[class*="item"]');for(var j=0;j<rows.length;j++){if((rows[j].textContent||'').indexOf(${JSON.stringify(name)})>=0){var rr=rows[j].getBoundingClientRect();if(rr.width>0&&rr.height>0)return rows[j];}}return null;})()`;
+  const rowState = await evaluate(tabId, `(function(){var el=${rowFinder};if(!el)return null;var r=el.getBoundingClientRect();return {tag:el.tagName,y:Math.round(r.top),h:Math.round(r.height)};})()`).catch(() => null);
   let clickedRow = false;
   if (rowState) {
     await evaluate(tabId, `(function(){var el=${rowFinder};if(el&&el.scrollIntoView)el.scrollIntoView({block:'center'});return 1;})()`).catch(() => {});
     await sleep(300);
-    const rc = await evaluate(tabId, `(function(){var el=${rowFinder};if(!el)return null;var r=el.getBoundingClientRect();if(r.top<0||r.bottom>window.innerHeight)return null;return {x:Math.round(r.left+30),y:Math.round(r.top+r.height/2)};})()`).catch(() => null);
-    if (rc) { await clickAt(tabId, rc.x, rc.y); clickedRow = true; await sleep(500); }
+    const rc = await evaluate(tabId, `(function(){var el=${rowFinder};if(!el)return null;var r=el.getBoundingClientRect();if(r.top<0||r.bottom>window.innerHeight)return null;return {x:Math.round(r.left+Math.min(12,r.width/2)),y:Math.round(r.top+r.height/2)};})()`).catch(() => null);
+    if (rc) { await clickAt(tabId, rc.x, rc.y); clickedRow = true; await sleep(600); }
   }
   // 확인/적용/선택 버튼(새배송지추가·임직원·취소 제외).
   const confirmFinder = `(function(){var box=document.querySelector('.v--modal-box');if(!box)return null;`
@@ -253,14 +262,15 @@ export async function cdpLotteonOptionAndBuy(tabId, url, orderOption, opts = {})
     //    뜨는 경우가 있어, 미표시 시 "변경" 모달을 열어 우리 주소를 선택한다.
     if (regInfo) {
       const nm = String(opts.recipient.name || '__none__');
-      const shownExpr = `((document.querySelector('.deliveryWrap')||{}).textContent||'').indexOf(${JSON.stringify(nm)})>=0 ? 1 : 0`;
+      // 수령인명이 배송영역(있으면 .deliveryWrap, 없으면 body)에 보이는지.
+      const shownExpr = `((document.querySelector('.deliveryWrap')||document.body).textContent||'').indexOf(${JSON.stringify(nm)})>=0 ? 1 : 0`;
       let shown = await waitFor(tabId, shownExpr, { timeout: 6000 }).catch(() => 0);
       let modalDump = null;
       if (!shown) {
         modalDump = await ensureAddressSelected(tabId, nm, regInfo.dvpSn).catch((e) => ({ err: String(e) }));
         shown = await waitFor(tabId, shownExpr, { timeout: 6000 }).catch(() => 0);
       }
-      const deliveryText = await evaluate(tabId, `(function(){var d=document.querySelector('.deliveryWrap');return d?(d.textContent||'').replace(/\\s+/g,' ').trim().slice(0,140):null;})()`).catch(() => null);
+      const deliveryText = await evaluate(tabId, `(function(){var d=document.querySelector('.deliveryWrap')||document.querySelector('[class*="deliver"],[class*="Deliver"]');return d?(d.textContent||'').replace(/\\s+/g,' ').trim().slice(0,160):null;})()`).catch(() => null);
       return { ok: true, stage: 'delivery_set', optionMatched, dvpSn: regInfo.dvpSn, address1: regInfo.address1, recipientShown: !!shown, deliveryText, modalDump };
     }
     return { ok: true, stage: 'order_form', optionMatched };
