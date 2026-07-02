@@ -145,11 +145,13 @@ const SIDO_SHORT = {
   '제주특별자치도': '제주', '제주도': '제주',
 };
 
+// 무신사 배송지 mobile 은 01X 휴대폰만 허용(실측: 0504 안심번호·070 등은 "일시적인 문제"로 거부).
+// 유효 휴대폰이면 하이픈 표기 반환, 아니면 null → 호출부에서 invalid_phone 으로 fail-loud.
 function normPhone(p) {
   const d = String(p || '').replace(/\D/g, '');
-  if (d.length === 11) return d.slice(0, 3) + '-' + d.slice(3, 7) + '-' + d.slice(7);
-  if (d.length === 10) return d.slice(0, 3) + '-' + d.slice(3, 6) + '-' + d.slice(6);
-  return String(p || '').trim();
+  if (/^01[016789]\d{8}$/.test(d)) return d.slice(0, 3) + '-' + d.slice(3, 7) + '-' + d.slice(7); // 11자리 → 3-4-4
+  if (/^01[016789]\d{7}$/.test(d)) return d.slice(0, 3) + '-' + d.slice(3, 6) + '-' + d.slice(6); // 10자리(011 등) → 3-3-4
+  return null;
 }
 
 // 시도 표기 변형 생성: 축약형 우선 + 원형 유지. "○○통합특별시"(행정개편명, 예: 전남광주통합특별시)는
@@ -460,21 +462,42 @@ export async function cdpSelectOptionAndBuy(tabId, goodsNo, orderOption, opts = 
       const name = String(rc.name || '').trim();
       const mobile = normPhone(rc.phone);
       const zipcode = String(rc.zipcode || '').replace(/\D/g, '');
+      // 전화번호가 있으나 01X 휴대폰이 아니면(0504 안심번호 등) 별도 신호 — 팝업서 직접입력 유도.
+      if (rc.phone && !mobile) {
+        return { ok: false, stage: 'invalid_phone', optionMatched, phone: String(rc.phone) };
+      }
       if (!name || !mobile || zipcode.length !== 5 || !String(rc.address || '').trim()) {
         return { ok: false, stage: 'recipient_incomplete', optionMatched,
           missing: { name: !name, mobile: !mobile, zipcode: zipcode.length !== 5, address: !String(rc.address || '').trim() } };
       }
-      const candidates = buildAddressCandidates(rc.address, rc.addressDetail);
+      // saveAction 은 유효주소면 첫 후보에서 성공(실측). 실패 메시지 "일시적인 문제"는 검증실패와
+      // 레이트리밋이 동일해 구분 불가 → 후보를 연속 버스트하면 레이트리밋을 유발/악화(악순환).
+      // 전략: ①후보를 간격 두고 순차 1회씩(성공 즉시 종료=유효주소 1콜) ②전부 실패면 레이트리밋
+      // 가능성이 높으니 쿨다운(3s→6s) 후 대표 후보를 재시도해 회복. address2 빈값은 거부되므로 '-'.
+      const candidates = buildAddressCandidates(rc.address, rc.addressDetail).slice(0, 4);
       let addressSave = null;
       const attempts = [];
-      for (const cand of candidates.slice(0, 6)) {
-        // address2 빈 문자열은 saveAction 이 거부(실측) → '-' 폴백.
+      const trySave = async (cand) => {
         const body = { name, mobile, zipcode, address1: cand.address1, address2: String(cand.address2 || '').trim() || '-', isDefault: true, additionalMessage: '', additionalMessageManual: '' };
         let res = null;
         try { res = await evaluate(tabId, addrPostExpr('saveAction', body)); } catch (e) { res = { status: 0, result: false, id: null, message: String(e && e.message || e) }; }
         attempts.push({ address1: cand.address1, status: res && res.status, message: res && res.message });
-        if (res && res.result && res.id) { addressSave = { id: res.id, address1: cand.address1, address2: cand.address2 }; break; }
-        await sleep(1500); // 검증실패/레이트리밋 문구가 동일 → 간격 두고 다음 후보
+        if (res && res.result && res.id) { addressSave = { id: res.id, address1: cand.address1, address2: cand.address2 }; return true; }
+        return false;
+      };
+      // Pass 1: 대표 후보(후보0)만 간격 넓혀 재시도. 유효주소는 후보0에서 성공하므로 공통경로=1콜.
+      //   실패 시 레이트리밋 가능성이 높으니 넉넉한 쿨다운(0→4s→9s)으로 윈도우 회복 대기.
+      //   ★버스트 금지: 여러 후보를 연속 호출하면 오히려 레이트리밋을 자초(실측).
+      for (const wait of [0, 4000, 9000]) {
+        if (wait) await sleep(wait);
+        if (await trySave(candidates[0])) break;
+      }
+      // Pass 2: 후보0이 끝내 실패 → 형식 문제일 수 있으니 대체 형식 후보를 간격 두고 시도.
+      if (!addressSave) {
+        for (let i = 1; i < candidates.length; i++) {
+          await sleep(2500);
+          if (await trySave(candidates[i])) break;
+        }
       }
       if (!addressSave) {
         // fail-loud: 배송지 미설정 상태로 delivery_set 을 반환하지 않는다(사용자 수동 입력 필요).

@@ -63,7 +63,17 @@ export function registerSourcingExternalHandler() {
           //   최종 결과는 lastCdpResult(storage, GET_LAST_RESULT)로 남긴다.
           if (d.vendor === 'musinsa' && goodsNo && d.recipient) {
             const rc = d.recipient;
-            const recipient = { name: rc.name, phone: rc.phone, zipcode: rc.zipCode, address: rc.address, addressDetail: rc.addressDetail };
+            // 배송 정보: 서버 payload(주문자 정보)가 기본. 팝업에서 "직접 입력"을 선택하면 msg.recipient
+            //   로 커스텀 값이 오며, 값이 있는 필드만 덮어쓴다(예: 0504 안심번호 → 사용자가 실번호 입력).
+            const ov = msg.recipient || {};
+            const pick = (a, b) => (a != null && String(a).trim() !== '' ? a : b);
+            const recipient = {
+              name: pick(ov.name, rc.name),
+              phone: pick(ov.phone, rc.phone),
+              zipcode: pick(ov.zipCode ?? ov.zipcode, rc.zipCode),
+              address: pick(ov.address, rc.address),
+              addressDetail: pick(ov.addressDetail, rc.addressDetail),
+            };
             const tab = await chrome.tabs.create({ url: sourceUrl, active: true });
             try { if (tab.windowId != null) await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) { void e; }
             try { await chrome.tabs.update(tab.id, { active: true }); } catch (e) { void e; }
