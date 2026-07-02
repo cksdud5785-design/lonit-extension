@@ -393,7 +393,12 @@ export async function cdpSelectOptionAndBuy(tabId, goodsNo, orderOption, opts = 
     await waitFor(tabId, `(${F_BUY}) ? 1 : 0`, { timeout: 15000 });
     let clickedDims = 0;
     const dimTraces = [];
-    for (let i = 0; i < matched.item.values.length; i++) {
+    // 단일 아이템 + 옵션 드롭다운(placeholder 입력) 부재 = 옵션 선택 UI 없는 상품(가방/ONESIZE 등).
+    //   선택이 이미 되어 있으므로("총 N개") 선택 단계를 건너뛴다 — 없는 트리거를 찾느라 ~32s 낭비하고
+    //   그 사이 프로모/세션 변화로 구매하기 클릭이 어긋나 no_order_form 되던 문제 방지(실측 6346/6292).
+    const hasOptionUI = await evaluate(tabId, `document.querySelectorAll('input[placeholder]').length > 0 ? 1 : 0`).catch(() => 1);
+    const skipSelection = meta.items.length === 1 && !hasOptionUI;
+    for (let i = 0; !skipSelection && i < matched.item.values.length; i++) {
       const dim = meta.dims[i] || '';
       const value = matched.item.values[i];
       const allValues = meta.items.map((it) => it.values[i]).filter(Boolean);
@@ -428,11 +433,22 @@ export async function cdpSelectOptionAndBuy(tabId, goodsNo, orderOption, opts = 
       const got = await evaluate(tabId, QTY_VALUE_EXPR).catch(() => null);
       if (Number(got) !== qty) return { ok: false, stage: 'quantity_mismatch', optionMatched, want: qty, got };
     }
-    // 5) 구매하기 → 주문서.
-    await clickElement(tabId, F_BUY, '구매하기');
-    try {
-      await waitFor(tabId, `location.href.indexOf('/order/order-form')>=0 ? 1 : 0`, { timeout: 20000 });
-    } catch (e) {
+    // 5) 구매하기 → 주문서. ★옵션 없는 상품(가방/ONESIZE)은 구매하기가 뷰포트 아래(y>innerHeight)에
+    //    있어 좌표 클릭이 화면 밖에 떨어져 내비게이션 실패(실측 6292/6346) → 클릭 전 반드시 뷰포트
+    //    안으로 스크롤. 클릭 후 폴링, 미이동 시 스크롤+재클릭(최대 3회).
+    let onOrderForm = false;
+    for (let k = 0; k < 3 && !onOrderForm; k++) {
+      await evaluate(tabId, `(function(){var b=(${F_BUY});if(b&&b.scrollIntoView)b.scrollIntoView({block:'center',behavior:'instant'});return 1;})()`).catch(() => {});
+      await sleep(400);
+      const bc = await evaluate(tabId, centerInViewExpr(F_BUY)).catch(() => null);
+      if (bc) await clickAt(tabId, bc.x, bc.y);
+      else await clickElement(tabId, F_BUY, '구매하기').catch(() => {}); // 폴백: 히트테스트 실패 시 중심 클릭
+      try {
+        await waitFor(tabId, `location.href.indexOf('/order/order-form')>=0 ? 1 : 0`, { timeout: 8000 });
+        onOrderForm = true;
+      } catch (e) { await sleep(500); }
+    }
+    if (!onOrderForm) {
       const diag = await evaluate(tabId, DIAG_EXPR).catch(() => null);
       return { ok: false, stage: 'no_order_form', optionMatched, diag };
     }
