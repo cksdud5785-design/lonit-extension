@@ -96,14 +96,24 @@ export function parseOptionTokens(opt) {
 const normOpt = (t) => String(t || '').replace(/\s+/g, '').toUpperCase();
 
 // items: [{no, values:[string]}] (활성만). 규칙: ①아이템이 1개뿐이면 그것(옵션 없는 상품 포함)
-// ②모든 차원 값이 주문 토큰에 포함되는 아이템이 정확히 1개면 그것 ③그 외 null(fail-loud).
+// ②모든 차원 값이 매치되는 아이템이 정확히 1개면 그것 ③그 외 null(fail-loud).
+// 값 매치 = 정확 토큰(콤마/슬래시 분리) 이거나 주문옵션 전체 문자열에 포함. 후자는 값 자체에 슬래시가
+//   있는 사이즈("M7/W8(245~250)")·색상("Core Black / Gold Metallic")이 토큰분리로 깨지는 것을 보완.
 export function matchOptionItem(items, orderOption) {
   const active = Array.isArray(items) ? items : [];
   if (active.length === 1) return { item: active[0], reason: 'single' };
+  const full = normOpt(orderOption);
   const tokens = parseOptionTokens(orderOption).map(normOpt);
-  const hits = active.filter((it) => it.values.length > 0 && it.values.every((v) => tokens.includes(normOpt(v))));
+  const matchVal = (v) => { const nv = normOpt(v); return !!nv && (tokens.includes(nv) || full.includes(nv)); };
+  const hits = active.filter((it) => it.values.length > 0 && it.values.every(matchVal));
   if (hits.length === 1) return { item: hits[0], reason: 'token' };
-  return { item: null, reason: hits.length === 0 ? 'no_match' : 'ambiguous', hitCount: hits.length };
+  if (hits.length > 1) {
+    // 부분포함으로 복수 매치 시: 값 총길이가 가장 긴(=가장 구체적) 유일 아이템 선택, 동률이면 모호(fail-loud).
+    const scored = hits.map((it) => ({ it, len: it.values.reduce((s, v) => s + normOpt(v).length, 0) })).sort((a, b) => b.len - a.len);
+    if (scored.length >= 2 && scored[0].len === scored[1].len) return { item: null, reason: 'ambiguous', hitCount: hits.length };
+    return { item: scored[0].it, reason: 'token' };
+  }
+  return { item: null, reason: 'no_match', hitCount: 0 };
 }
 
 // 옵션 메타(차원명 + 활성 아이템) — PDP 탭에서 same-origin CORS 로 조회.
